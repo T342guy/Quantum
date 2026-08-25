@@ -37,7 +37,8 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             let started = Instant::now();
             let packed = block::pack(&data, &cfg, None);
             let elapsed = started.elapsed().as_secs_f64();
-            let size = packed.data.len() + 24;
+            // Framed, so the comparison includes our header like the others'.
+            let size = block::write_raw(&packed, level).len();
             row(&format!("quantum -{level}"), data.len(), size, elapsed);
         }
 

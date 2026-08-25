@@ -169,8 +169,7 @@ impl Archive {
         }
 
         let mut source = BlockSource::new(&self.path, &self.meta, self.cfg.clone(), threads)?;
-        let mut stats = Stats::default();
-        stats.archive_bytes = self.archive_bytes;
+        let mut stats = Stats { archive_bytes: self.archive_bytes, ..Default::default() };
 
         for &i in &selected {
             let entry = &self.meta.entries[i];
@@ -268,7 +267,7 @@ fn write_file(
                 } else if !opts.overwrite {
                     return Err(Error::Io(std::io::Error::new(
                         std::io::ErrorKind::AlreadyExists,
-                        format!("{} already exists", path.display()),
+                        format!("{} already exists (use --force to overwrite)", path.display()),
                     )));
                 }
             }

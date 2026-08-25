@@ -30,6 +30,9 @@ struct Source {
 /// Bytes read from disk at a time while chunking.
 const READ_WINDOW: usize = 4 * 1024 * 1024;
 
+/// Upper bound on a solid block.
+const MAX_BLOCK_SIZE: usize = 1 << 30;
+
 pub fn create(
     dest: &Path,
     roots: &[PathBuf],
@@ -45,13 +48,17 @@ pub fn create(
     }
 
     let cfg = Config::new(opts.level);
+    // Positions inside a block are indexed with 32-bit values, and there is no
+    // reason to want a block anywhere near this large anyway.
+    let block_size = opts.block_size.clamp(64 * 1024, MAX_BLOCK_SIZE);
+    let opts = &Options { block_size, ..opts.clone() };
     let file = File::create(dest)?;
     let mut out = BufWriter::new(file);
     let header = Header {
         version: VERSION,
         level: cfg.level,
         flags: if opts.dedup { FLAG_DEDUP } else { 0 },
-        block_size: opts.block_size as u32,
+        block_size: block_size as u32,
     };
     out.write_all(&header.write())?;
 
@@ -201,17 +208,16 @@ fn intern_chunk(
     pipe: &mut Pipeline<Job, Done>,
     out: &mut BufWriter<File>,
 ) -> Result<u32> {
+    let index = u32::try_from(state.meta.chunk_lens.len())
+        .map_err(|_| Error::Corrupt("too many chunks for one archive"))?;
     if opts.dedup {
         let id = chunk_id(chunk);
         if let Some(&existing) = state.seen.get(&id) {
             state.stats.deduped_bytes += chunk.len() as u64;
             return Ok(existing);
         }
-        let index = state.meta.chunk_lens.len() as u32;
         state.seen.insert(id, index);
     }
-    let index = state.meta.chunk_lens.len();
-    let index = u32::try_from(index).map_err(|_| Error::Corrupt("too many chunks for one archive"))?;
     state.meta.chunk_lens.push(chunk.len() as u32);
     state.block.extend_from_slice(chunk);
     if state.block.len() >= opts.block_size {
