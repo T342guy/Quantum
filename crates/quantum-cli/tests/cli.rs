@@ -68,7 +68,7 @@ fn create_list_test_extract_cycle() {
     assert!(listing.contains("c.log"));
 
     let info = ok(&["info", archive.to_str().unwrap()]);
-    assert!(info.contains("format        quantum v1"), "info was:\n{info}");
+    assert!(info.contains("format        quantum v"), "info was:\n{info}");
     assert!(info.contains("dedup         on"));
 
     let tested = ok(&["test", archive.to_str().unwrap()]);

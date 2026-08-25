@@ -128,13 +128,16 @@ pub fn unpack(packed: &Packed, cfg: &Config) -> Result<Vec<u8>> {
 // Self-describing single-stream format (`quantum raw`)
 // ---------------------------------------------------------------------------
 
-const RAW_MAGIC: [u8; 4] = *b"QNTR";
+/// Raw streams carry the model version in their magic rather than a separate
+/// field, so a stream written before the fast path existed still decodes.
+const RAW_MAGIC_V1: [u8; 4] = *b"QNTR";
+const RAW_MAGIC_V2: [u8; 4] = *b"QNT2";
 
 /// Serialise a block with a small self-describing header, for the raw
 /// stream commands that do not build an archive.
 pub fn write_raw(packed: &Packed, level: u8) -> Vec<u8> {
     let mut out = Vec::with_capacity(packed.data.len() + 32);
-    out.extend_from_slice(&RAW_MAGIC);
+    out.extend_from_slice(&RAW_MAGIC_V2);
     out.push(level);
     out.push(packed.method_byte());
     out.push(packed.filter.to_byte());
@@ -145,11 +148,20 @@ pub fn write_raw(packed: &Packed, level: u8) -> Vec<u8> {
     out
 }
 
-/// Parse a stream written by [`write_raw`], returning the block and its level.
-pub fn read_raw(input: &[u8]) -> Result<(Packed, u8)> {
-    if input.len() < 8 || input[..4] != RAW_MAGIC {
+/// Parse a stream written by [`write_raw`], returning the block, its level
+/// and the model version it was written with.
+pub fn read_raw(input: &[u8]) -> Result<(Packed, u8, u8)> {
+    if input.len() < 8 {
         return Err(Error::BadMagic);
     }
+    let magic = &input[..4];
+    let version = if magic == RAW_MAGIC_V2 {
+        2
+    } else if magic == RAW_MAGIC_V1 {
+        1
+    } else {
+        return Err(Error::BadMagic);
+    };
     let level = input[4];
     let method = Packed::method_from_byte(input[5])?;
     let filter = Filter::from_byte(input[6])?;
@@ -158,7 +170,7 @@ pub fn read_raw(input: &[u8]) -> Result<(Packed, u8)> {
     let checksum = u64::from_le_bytes(r.array::<8>()?);
     let data_len = r.usize()?;
     let data = r.take(data_len)?.to_vec();
-    Ok((Packed { method, filter, raw_len, checksum, data }, level))
+    Ok((Packed { method, filter, raw_len, checksum, data }, level, version))
 }
 
 #[cfg(test)]
@@ -241,9 +253,10 @@ mod tests {
         let cfg = Config::new(2);
         let packed = pack(&data, &cfg, None, Effort::Adaptive);
         let bytes = write_raw(&packed, 2);
-        let (back, level) = read_raw(&bytes).unwrap();
+        let (back, level, version) = read_raw(&bytes).unwrap();
         assert_eq!(level, 2);
-        assert_eq!(unpack(&back, &Config::new(level)).unwrap(), data);
+        assert_eq!(version, crate::archive::format::VERSION);
+        assert_eq!(unpack(&back, &Config::for_version(version, level)).unwrap(), data);
 
         assert!(matches!(read_raw(b"nope").unwrap_err(), Error::BadMagic));
         assert!(read_raw(&bytes[..bytes.len() - 4]).is_err(), "truncation must be rejected");

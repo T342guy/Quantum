@@ -159,7 +159,7 @@ fn create(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = started.elapsed();
 
     if !args.quiet {
-        report::creation_summary(&stats, elapsed);
+        report::creation_summary(&stats, elapsed, opts.block_size, plan.threads);
     }
     Ok(())
 }
@@ -298,8 +298,8 @@ fn compress_stream(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
 fn decompress_stream(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let data = read_input(args)?;
-    let (packed, level) = block::read_raw(&data)?;
-    let out = block::unpack(&packed, &Config::new(level))?;
+    let (packed, level, version) = block::read_raw(&data)?;
+    let out = block::unpack(&packed, &Config::for_version(version, level))?;
     write_output(args, &out)
 }
 

@@ -41,7 +41,43 @@ fn rate(bytes: u64, d: Duration) -> String {
     format!("{}/s", format_bytes((bytes as f64 / s) as u64))
 }
 
-pub fn creation_summary(stats: &Stats, elapsed: Duration) {
+/// Point out when the input produced fewer blocks than there are cores, so
+/// most of the machine sat idle. Blocks are the unit of parallelism, and
+/// their size is the one setting that controls how many there are.
+fn parallelism_hint(stats: &Stats, block_size: usize, available: usize) {
+    if stats.total_blocks == 0 || available <= 1 {
+        return;
+    }
+    let blocks = stats.total_blocks as usize;
+    if blocks * 3 >= available * 2 {
+        return; // Already using most of the machine.
+    }
+    // Halve until there would be roughly one block per core, but never below
+    // 2 MiB, where the ratio cost stops being worth it.
+    let mut suggested = block_size;
+    let mut count = blocks;
+    while count * 2 <= available && suggested > 2 * 1024 * 1024 {
+        suggested /= 2;
+        count *= 2;
+    }
+    if suggested == block_size {
+        return;
+    }
+    eprintln!();
+    eprintln!(
+        "  note: {blocks} block(s) over {available} core(s) left most of the machine idle.",
+    );
+    eprintln!(
+        "  `-b {}` would make about {count} and run several times faster, for roughly 1-2% more size.",
+        if suggested >= 1024 * 1024 {
+            format!("{}M", suggested / (1024 * 1024))
+        } else {
+            format!("{}K", suggested / 1024)
+        }
+    );
+}
+
+pub fn creation_summary(stats: &Stats, elapsed: Duration, block_size: usize, available: usize) {
     let raw = stats.raw_bytes;
     let archive = stats.archive_bytes;
     eprintln!();
@@ -81,6 +117,7 @@ pub fn creation_summary(stats: &Stats, elapsed: Duration) {
         stats.threads,
         format_bytes(stats.memory_bytes)
     );
+    parallelism_hint(stats, block_size, available);
     if stats.mostly_incompressible() {
         eprintln!();
         eprintln!(
@@ -238,7 +275,7 @@ pub fn info(archive: &Archive) {
     let dirs = archive.entries().iter().filter(|e| e.kind == Kind::Dir).count();
     let links = archive.entries().iter().filter(|e| e.kind == Kind::Symlink).count();
 
-    println!("format        quantum v1");
+    println!("format        quantum v{}", archive.version());
     println!("level         {}", archive.level());
     println!("block size    {}", format_bytes(archive.block_size() as u64));
     println!("dedup         {}", if archive.deduplicated() { "on" } else { "off" });

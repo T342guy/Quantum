@@ -384,9 +384,12 @@ fn raw_stream_matches_the_archive_codec() {
             let cfg = Config::new(level);
             let packed = block::pack(&data, &cfg, None, block::Effort::Adaptive);
             let framed = block::write_raw(&packed, level);
-            let (back, got_level) = block::read_raw(&framed).unwrap();
+            let (back, got_level, version) = block::read_raw(&framed).unwrap();
             assert_eq!(got_level, level);
-            assert_eq!(block::unpack(&back, &Config::new(got_level)).unwrap(), data);
+            assert_eq!(
+                block::unpack(&back, &Config::for_version(version, got_level)).unwrap(),
+                data
+            );
         }
     }
 }
@@ -424,6 +427,32 @@ fn accounting_adds_up() {
     // input total: shared chunks are stored once.
     let unique: u64 = a.total_size() - a.deduplicated_bytes();
     assert_eq!(block_raw, unique, "blocks should hold exactly the unique bytes");
+}
+
+#[test]
+fn both_model_versions_round_trip_and_differ() {
+    let mut rng = Rng::new(31415);
+    // Long repeats are what the version 2 fast path reacts to.
+    let unit = rng.prose(20_000);
+    let data = unit.repeat(40);
+
+    for level in [1u8, 5, 9] {
+        let v1 = Config::for_version(1, level);
+        let v2 = Config::for_version(2, level);
+
+        let a = block::pack(&data, &v1, None, block::Effort::Always);
+        let b = block::pack(&data, &v2, None, block::Effort::Always);
+
+        // Each version must decode its own output exactly.
+        assert_eq!(block::unpack(&a, &v1).unwrap(), data, "v1 round trip, level {level}");
+        assert_eq!(block::unpack(&b, &v2).unwrap(), data, "v2 round trip, level {level}");
+
+        // And they really are different models, or the version gate is a lie.
+        assert_ne!(
+            a.data, b.data,
+            "level {level}: the fast path should change the coding of repeated data"
+        );
+    }
 }
 
 #[test]

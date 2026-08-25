@@ -51,7 +51,7 @@ impl Archive {
         let mut head = [0u8; HEADER_LEN];
         file.read_exact(&mut head)?;
         let header = Header::parse(&head)?;
-        let cfg = Config::new(header.level);
+        let cfg = Config::for_version(header.version, header.level);
 
         let mut foot = [0u8; FOOTER_LEN];
         file.seek(SeekFrom::End(-(FOOTER_LEN as i64)))?;
@@ -154,6 +154,11 @@ impl Archive {
 
     pub fn level(&self) -> u8 {
         self.header.level
+    }
+
+    /// Format version this archive was written with.
+    pub fn version(&self) -> u8 {
+        self.header.version
     }
 
     pub fn block_size(&self) -> u32 {

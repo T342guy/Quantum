@@ -45,6 +45,12 @@ impl MatchModel {
         }
     }
 
+    /// Length of the match currently being ridden, or 0 if there is none.
+    #[inline(always)]
+    pub fn len(&self) -> u32 {
+        self.len
+    }
+
     /// How confident the model currently is, bucketed for use as a mixer
     /// context: 0 = no match, 1 = short, 2 = long.
     #[inline(always)]

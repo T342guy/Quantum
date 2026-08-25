@@ -1,4 +1,4 @@
-# The `.quantum` format, version 1
+# The `.quantum` format, version 2
 
 All integers are little-endian. `varint` means LEB128: seven bits per byte,
 high bit set to continue. `zigzag` means a signed value mapped to unsigned as
@@ -25,7 +25,7 @@ reader finds the index with one seek to the end.
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 4 | Magic, `"QNTM"` |
-| 4 | 1 | Format version, currently `1` |
+| 4 | 1 | Format version, currently `2`; version `1` is still readable |
 | 5 | 1 | Compression level, 1–9 |
 | 6 | 2 | Flags |
 | 8 | 4 | Target uncompressed bytes per block |
@@ -36,6 +36,11 @@ Flags: bit 0 set means the archive is deduplicated.
 The level matters to the decoder, not just as a record: it determines which
 models exist and how large their tables are. Both sides derive those from the
 level and the block length, so nothing about the model is stored.
+
+The version matters for the same reason. Version 2 codes a byte from the
+match model alone once the current match reaches 128 bytes; version 1 has no
+such path. A reader rebuilds whichever model the archive's version names, so
+older archives keep decoding exactly.
 
 ## Footer (40 bytes, at the end of the file)
 
@@ -180,6 +185,12 @@ Three layers, all verified by `quantum test`:
 
 ## Compatibility
 
-Version 1 is the only version. A reader must refuse any other value rather
-than guess. Reserved fields are zero and must be ignored, not rejected, so
-that a later version can use them without invalidating the layout.
+The version byte selects the model, so a reader must rebuild the one its
+value names rather than assume the newest. This build writes version 2 and
+reads versions 1 and 2; anything else must be refused rather than guessed at.
+
+Raw single-block streams carry the same distinction in their magic: `QNT2`
+for version 2, `QNTR` for version 1.
+
+Reserved fields are zero and must be ignored, not rejected, so that a later
+version can use them without invalidating the layout.

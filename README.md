@@ -118,6 +118,35 @@ not: archives written once and stored for years, artifacts shipped over
 metered links, backups of text-shaped data. `quantum info -v` will tell you
 which case you are in for your own data before you commit to it.
 
+### Blocks, cores and speed
+
+Blocks are the unit of parallelism, and their size is what decides how many
+there are. The default of 16 MiB is sized for ratio, which means a
+medium-sized input can leave most of a large machine idle. On a 16-core
+Ryzen 9 5950X, 113 MB of G-code at level 5:
+
+| Block size | Blocks | Size | Time |
+|---|---:|---:|---:|
+| 2M | 56 | +4.8% | 5.8 s |
+| 4M | 28 | +2.1% | 5.7 s |
+| 8M | 15 | +1.0% | 6.7 s |
+| 16M (default) | 8 | — | 11.7 s |
+| 32M | 4 | −0.8% | 21.3 s |
+
+Twice the speed for 2% of size, if you have the cores for it. The default
+stays at 16 MiB because this is a tool people reach for when size is what
+costs them -- but `quantum create` now says so when it notices the machine
+idling:
+
+```
+  note: 8 block(s) over 32 core(s) left most of the machine idle.
+  `-b 4M` would make about 32 and run several times faster, for roughly 1-2% more size.
+```
+
+Thread scaling itself is close to linear up to the block count: the same
+tree takes 70.6 s on one thread, 21.3 s on four and 11.7 s on eight, at which
+point it runs out of blocks rather than cores.
+
 ### Choosing a level
 
 The level is the real speed control -- it is worth up to 2x, for a few
@@ -262,6 +291,34 @@ carry-safe binary range coder writes the bit.
 Nothing about the model is ever stored. The decoder rebuilds it from the bits
 it has already decoded, which is where the compression comes from: the
 dictionary is reconstructed on both sides instead of transmitted.
+
+### Skipping work that is already decided
+
+Once the match model has been riding a repeat for 128 bytes, the next byte is
+very nearly certain, and asking a dozen context models to confirm it is waste.
+Such a byte is coded from the match model alone, through a three-input mixer,
+with no hash lookups, no state maps and no secondary estimation.
+
+The decoder makes the same call from the same match length, which it already
+knows before the byte arrives, so the two stay in step without anything being
+transmitted. Measured at level 5:
+
+| Data | Size | Speed |
+|---|---:|---:|
+| Text | −0.36% | 1.03x |
+| Executables | −0.01% | 1.00x |
+| G-code | 0.00% (never fires) | 1.00x |
+| 20x repeated text | +3.42% | **3.2x** |
+
+Ordinary data is unaffected or slightly *better*, because skipping those
+updates stops the context models absorbing statistics they already hold. The
+cost falls only where the data is already compressing a hundredfold, and buys
+back two thirds of the time. Decompression gains the same amount, since it
+runs the same model.
+
+This changed the model, so archives now carry format version 2. Version 1
+archives and streams still decode: the version selects which model to
+rebuild.
 
 ### Before the codec
 

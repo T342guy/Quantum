@@ -19,7 +19,10 @@ use crate::varint::{self, Reader};
 
 pub const MAGIC: [u8; 4] = *b"QNTM";
 pub const FOOTER_MAGIC: [u8; 4] = *b"MTNQ";
-pub const VERSION: u8 = 1;
+/// Version written by this build.
+pub const VERSION: u8 = 2;
+/// Oldest version this build can still read.
+pub const MIN_READABLE_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 16;
 pub const FOOTER_LEN: usize = 40;
 
@@ -50,7 +53,7 @@ impl Header {
             return Err(Error::BadMagic);
         }
         let version = bytes[4];
-        if version != VERSION {
+        if !(MIN_READABLE_VERSION..=VERSION).contains(&version) {
             return Err(Error::UnsupportedVersion(version));
         }
         Ok(Header {
@@ -457,6 +460,17 @@ mod tests {
             meta_filter: 0,
         };
         assert_eq!(Footer::parse(&f.write()).unwrap(), f);
+    }
+
+    #[test]
+    fn older_versions_are_still_readable() {
+        // Version 1 archives predate the match-only fast path; they must keep
+        // parsing so that the model can be reconstructed as it was.
+        let mut bytes = Header { version: VERSION, level: 5, flags: 0, block_size: 1 << 24 }.write();
+        bytes[4] = 1;
+        assert_eq!(Header::parse(&bytes).unwrap().version, 1);
+        bytes[4] = VERSION + 1;
+        assert!(matches!(Header::parse(&bytes).unwrap_err(), Error::UnsupportedVersion(_)));
     }
 
     #[test]
