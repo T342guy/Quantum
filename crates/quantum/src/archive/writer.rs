@@ -9,7 +9,7 @@ use super::format::{
     BlockRec, Entry, FLAG_DEDUP, Footer, HEADER_LEN, Header, Kind, Metadata, VERSION,
 };
 use super::{Event, Options, Stats};
-use crate::block::{self, Packed};
+use crate::block::{self, Effort, Packed};
 use crate::chunker::{self, ChunkSizes};
 use crate::codec::Config;
 use crate::error::{Error, Result};
@@ -51,7 +51,15 @@ pub fn create(
     // Positions inside a block are indexed with 32-bit values, and there is no
     // reason to want a block anywhere near this large anyway.
     let block_size = opts.block_size.clamp(64 * 1024, MAX_BLOCK_SIZE);
-    let opts = &Options { block_size, ..opts.clone() };
+
+    // A worker that never receives a block still costs nothing, but promising
+    // one is misleading: each holds a model worth hundreds of megabytes at
+    // high levels, and a 40 MB input only ever produces a handful of blocks.
+    // Deduplication can only shrink the total, so this is an upper bound.
+    let total_input: u64 = sources.iter().filter(|s| s.kind == Kind::File).map(|s| s.size).sum();
+    let blocks = total_input.div_ceil(block_size as u64).max(1);
+    let threads = opts.threads.clamp(1, blocks.min(usize::MAX as u64) as usize);
+    let opts = &Options { block_size, threads, ..opts.clone() };
     let file = File::create(dest)?;
     let mut out = BufWriter::new(file);
     let header = Header {
@@ -73,8 +81,14 @@ pub fn create(
     };
 
     let forced_filter = opts.filter;
+    let effort = opts.effort;
+    let worker_cfg = cfg.clone();
     let mut pipe = Pipeline::new(opts.threads, move |job: Job| {
-        (block::pack(&job.data, &cfg, forced_filter), job.first_chunk, job.n_chunks)
+        (
+            block::pack(&job.data, &worker_cfg, forced_filter, effort),
+            job.first_chunk,
+            job.n_chunks,
+        )
     });
 
     for src in &sources {
@@ -112,7 +126,9 @@ pub fn create(
     // repetitive (sorted paths, runs of consecutive chunk ids), so this is
     // usually a 5-10x saving on the archive's fixed overhead.
     let raw_meta = state.meta.encode();
-    let meta_packed = block::pack(&raw_meta, &Config::new(opts.level), None);
+    // The index is always worth modelling: it is small, and it is repetitive
+    // enough that the sample check would only waste a decision on it.
+    let meta_packed = block::pack(&raw_meta, &Config::new(opts.level), None, Effort::Always);
     let meta_offset = state.offset;
     out.write_all(&meta_packed.data)?;
     let footer = Footer {
@@ -129,6 +145,8 @@ pub fn create(
     let mut stats = state.stats;
     stats.archive_bytes = out.get_mut().stream_position()?;
     stats.metadata_bytes = meta_packed.data.len() as u64 + super::format::FOOTER_LEN as u64;
+    stats.threads = threads;
+    stats.memory_bytes = cfg.memory_for_block(block_size) as u64 * threads as u64;
     Ok(stats)
 }
 
@@ -260,6 +278,10 @@ fn write_block(state: &mut BuildState, done: Done, out: &mut BufWriter<File>) ->
     });
     state.offset += packed.data.len() as u64;
     state.stats.stored_bytes += packed.data.len() as u64;
+    state.stats.total_blocks += 1;
+    if packed.method == crate::block::Method::Stored {
+        state.stats.stored_blocks += 1;
+    }
     Ok(())
 }
 

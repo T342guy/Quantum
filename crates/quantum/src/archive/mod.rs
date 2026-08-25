@@ -26,6 +26,7 @@ pub use reader::Archive;
 use crate::chunker::{self, ChunkSizes};
 use crate::codec::DEFAULT_LEVEL;
 use crate::error::Result;
+use crate::block::Effort;
 use crate::filters::Filter;
 
 /// Default uncompressed bytes per block.
@@ -44,6 +45,8 @@ pub struct Options {
     pub threads: usize,
     /// Force a preprocessing filter instead of probing for one.
     pub filter: Option<Filter>,
+    /// Whether to model blocks that look already compressed.
+    pub effort: Effort,
     pub follow_symlinks: bool,
     /// Group files by extension so solid blocks see similar content.
     pub sort: bool,
@@ -58,6 +61,7 @@ impl Default for Options {
             dedup: true,
             threads: crate::parallel::default_threads(),
             filter: None,
+            effort: Effort::default(),
             follow_symlinks: false,
             sort: true,
             chunk_sizes: chunker::DEFAULT_SIZES,
@@ -113,6 +117,22 @@ pub struct Stats {
     pub deduped_bytes: u64,
     pub archive_bytes: u64,
     pub metadata_bytes: u64,
+    /// Worker threads actually used, which can be fewer than requested if the
+    /// input does not have enough blocks to keep them busy.
+    pub threads: usize,
+    /// Peak model memory: one worker's working set times the threads used.
+    pub memory_bytes: u64,
+    /// Blocks written verbatim because they were already compressed.
+    pub stored_blocks: u64,
+    pub total_blocks: u64,
+}
+
+impl Stats {
+    /// True when most of the input turned out to be already compressed, which
+    /// is worth saying out loud: the result is not a bug, it is the data.
+    pub fn mostly_incompressible(&self) -> bool {
+        self.total_blocks > 0 && self.stored_blocks * 2 > self.total_blocks
+    }
 }
 
 /// Progress notifications.

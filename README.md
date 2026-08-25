@@ -6,6 +6,10 @@ Quantum spends CPU to buy size. Where ZIP stores every file separately with a
 1993-era LZ77 coder, and even `tar.xz` looks at the data through a single
 sliding window, Quantum does three things in sequence:
 
+0. **Declines the work when there is none to do.** A cheap sample of each
+   block decides whether it is already compressed; video, audio, images and
+   existing archives are stored verbatim in milliseconds rather than modelled
+   for minutes to save a fraction of a percent.
 1. **Deduplicates** content-defined chunks across the entire input, so
    repeated data — anywhere, at any alignment, in any file — is stored once.
 2. **Packs what remains into large solid blocks**, so the model builds
@@ -36,11 +40,12 @@ reference compressor. Lower is better.
 | Python source, 2.9 MiB | 628 KiB | 506 KiB | 478 KiB | **383 KiB** | **375 KiB** |
 | JSON/XML/config, 1.4 MiB | 188 KiB | 155 KiB | 136 KiB | **97.1 KiB** | **92.9 KiB** |
 | ELF executables, 2.9 MiB | 1.5 MiB | 1.4 MiB | 1.2 MiB | **1.0 MiB** | **1011 KiB** |
-| Random bytes, 1.9 MiB | +339 B | +8.8 KiB | +160 B | **+0 B** | **+0 B** |
+| Random bytes, 1.9 MiB | +339 B | +8.8 KiB | +160 B | **+21 B** | **+21 B** |
 
 Against `xz -9e`, level 9 is 24% smaller on text, 22% on source, 32% on
 structured data and 18% on executables. On incompressible input Quantum stores
-the block verbatim, so it is the only one of the four that never grows.
+the block verbatim, so the only cost is a 21-byte stream header — and inside
+an archive, nothing at all.
 
 ### A directory tree
 
@@ -59,6 +64,30 @@ cross-file redundancy to find).
 | **`quantum -9`** | **12,861,262** | **−5.2%** | 132 s |
 
 Deduplication alone removed 50% of `/usr/share/doc` before the compressor ran.
+
+### Already-compressed input
+
+Video, audio, JPEG/PNG, and existing `.zip`/`.gz`/`.xz` files are *already
+compressed*, by codecs designed for that specific kind of data. There is
+essentially no redundancy left for a general-purpose compressor to find, and
+that is true of every one of them:
+
+| A 7 MB already-compressed file | Saved |
+|---|---:|
+| `gzip -9` | 2.4% |
+| `bzip2 -9` | 1.9% |
+| `xz -9e` | 2.5% |
+| `quantum -9` | 2.3% |
+
+So a ratio near 1.00x on an `.mp4` is the data talking, not a fault — and no
+setting will change it. What Quantum does do is *notice*, from a sample, and
+skip the modelling entirely: a 21 MB opaque payload is archived in 0.7 s
+instead of 84 s, for byte-identical output. When that happens it says so in
+the summary. `--force-compress` models it anyway, if you want to see for
+yourself.
+
+The corollary is worth stating: point Quantum at source trees, logs,
+databases, documents, mail, VM images, firmware — not at your media library.
 
 ### The honest part
 
@@ -110,6 +139,7 @@ Useful options:
 | `-T, --threads <n>` | Workers. Defaults to your core count, trimmed to fit in memory |
 | `--no-dedup` | Skip deduplication |
 | `--filter <f>` | `auto` (default), `none`, `x86`, `delta:N` |
+| `--force-compress` | Model every block, even already-compressed ones |
 | `-v, --verbose` | List entries as they are processed |
 
 `quantum bench <files>` compares this build against whichever of gzip, bzip2,

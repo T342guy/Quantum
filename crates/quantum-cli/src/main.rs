@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use args::{Args, Command, Parsed};
 use quantum::archive::{self, ExtractOptions, Options};
 use quantum::filters::Filter;
+use quantum::block::Effort;
 use quantum::{Config, block};
 use report::{format_bytes, format_duration};
 
@@ -76,6 +77,7 @@ fn build_options(args: &Args) -> Result<Options, Box<dyn std::error::Error>> {
     let mut opts = Options {
         dedup: args.dedup,
         sort: args.sort,
+        effort: if args.force_compress { Effort::Always } else { Effort::Adaptive },
         ..Default::default()
     };
     if let Some(l) = args.level {
@@ -124,25 +126,25 @@ fn create(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut opts = build_options(args)?;
+    // The memory plan is an upper bound on threads; the archiver lowers it
+    // further if the input has fewer blocks than that.
     let plan = limits::plan(&Config::new(opts.level), opts.block_size, opts.threads);
     opts.threads = plan.threads;
     if !args.quiet {
         if let Some(wanted) = plan.reduced_from {
             eprintln!(
-                "note: using {} thread(s) instead of {wanted}; level {} needs about {} each",
+                "note: capping at {} thread(s) rather than {wanted}; level {} needs about {} of model memory per thread",
                 plan.threads,
                 opts.level,
                 format_bytes(plan.per_thread_bytes)
             );
         }
         eprintln!(
-            "creating {} at level {} ({} thread(s), {} blocks{}, ~{} memory)",
+            "creating {} at level {} ({} blocks{})",
             dest.display(),
             opts.level,
-            opts.threads,
             format_bytes(opts.block_size as u64),
-            if opts.dedup { ", deduplicated" } else { "" },
-            format_bytes(plan.per_thread_bytes * opts.threads as u64)
+            if opts.dedup { ", deduplicated" } else { "" }
         );
     }
 
@@ -276,7 +278,8 @@ fn compress_stream(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let level = args.level.unwrap_or(quantum::DEFAULT_LEVEL);
     let cfg = Config::new(level);
     let filter = args.filter.as_deref().map(parse_filter).transpose()?.flatten();
-    let packed = block::pack(&data, &cfg, filter);
+    let effort = if args.force_compress { Effort::Always } else { Effort::Adaptive };
+    let packed = block::pack(&data, &cfg, filter, effort);
     let framed = block::write_raw(&packed, level);
     if !args.quiet {
         eprintln!(

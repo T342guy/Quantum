@@ -18,7 +18,7 @@ fn main() {
     for path in &args[1..] {
         let data = std::fs::read(path).unwrap();
         let t0 = Instant::now();
-        let packed = block::pack(&data, &cfg, force);
+        let packed = block::pack(&data, &cfg, force, block::Effort::Always);
         let ct = t0.elapsed().as_secs_f64();
         let t1 = Instant::now();
         let back = block::unpack(&packed, &cfg).unwrap();

@@ -115,6 +115,11 @@ A block is the unit of independent compression. Its payload is either the raw
 bytes (method 0) or the output of the context-mixing coder (method 1), applied
 after the filter named in the block record.
 
+*When* an encoder chooses method 0 is entirely up to it — the decoder only
+reads what it was told. This implementation stores a block verbatim if
+modelling it came out no smaller, and also if a sample of it says it is
+already compressed, but neither rule is part of the format.
+
 Decoding a block is:
 
 1. Read `compressed length` bytes at `offset`.

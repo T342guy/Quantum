@@ -150,7 +150,26 @@ fn probe_slices(block: &[u8]) -> Vec<(usize, &[u8])> {
         .collect()
 }
 
-/// Pick the preprocessing filter for this block.
+/// What a cheap look at a block says about how to compress it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Analysis {
+    pub filter: Filter,
+    /// The block is already compressed (video, audio, images, other
+    /// archives), and modelling it would burn a lot of time for nothing.
+    pub incompressible: bool,
+}
+
+/// Percentage of its original size a sample has to stay above before the
+/// block is written verbatim instead of modelled.
+///
+/// Level 1 on a sample is a good predictor of what level 9 will manage on the
+/// block: the gap between levels is a few percent, not tens. So if a cheap
+/// pass cannot get below this, an expensive one will not either -- and on
+/// media files that is the difference between a second and several minutes
+/// for the same result.
+const INCOMPRESSIBLE_PERCENT: usize = 98;
+
+/// Decide how to handle a block, from a sample of it.
 ///
 /// The two filters need different decision procedures, because their payoffs
 /// have different shapes:
@@ -165,24 +184,32 @@ fn probe_slices(block: &[u8]) -> Vec<(usize, &[u8])> {
 /// * **delta** pays off immediately and locally, so a sample measures it
 ///   faithfully and it is decided by probing -- which matters, because delta
 ///   applied to the wrong data is destructive.
-pub fn choose(block: &[u8]) -> Filter {
+pub fn analyze(block: &[u8]) -> Analysis {
+    let plain = Analysis { filter: Filter::None, incompressible: false };
     if block.len() < MIN_PROBE_INPUT {
-        return Filter::None;
+        return plain;
     }
     let slices = probe_slices(block);
     let sample: Vec<u8> = slices.iter().flat_map(|(_, s)| s.iter().copied()).collect();
 
+    // Machine code is never mistaken for already-compressed data, and the
+    // check is free, so it settles the question first.
     if looks_like_code(&sample) {
-        return Filter::X86;
+        return Analysis { filter: Filter::X86, incompressible: false };
     }
-    let Some(stride) = likely_stride(&sample) else {
-        return Filter::None;
-    };
 
-    // A cheap level is enough to rank the candidates; the ordering barely
-    // moves with level and probing at level 9 would cost real time.
+    // A cheap level is enough both to judge compressibility and to rank
+    // filters; the ordering barely moves with level, and probing at level 9
+    // would cost real time.
     let probe_cfg = Config::new(1);
     let baseline = compress_block(&sample, &probe_cfg).len();
+    if baseline * 100 >= sample.len() * INCOMPRESSIBLE_PERCENT {
+        return Analysis { filter: Filter::None, incompressible: true };
+    }
+
+    let Some(stride) = likely_stride(&sample) else {
+        return plain;
+    };
     let mut transformed = sample.clone();
     Filter::Delta(stride).apply(&mut transformed);
     let with_delta = compress_block(&transformed, &probe_cfg).len();
@@ -190,10 +217,16 @@ pub fn choose(block: &[u8]) -> Filter {
     // Only switch if the win clears the margin, since the probe is an
     // estimate taken from a fraction of the block.
     if with_delta + baseline * PROBE_MARGIN_PERCENT / 100 < baseline {
-        Filter::Delta(stride)
+        Analysis { filter: Filter::Delta(stride), incompressible: false }
     } else {
-        Filter::None
+        plain
     }
+}
+
+/// Pick the preprocessing filter for a block, ignoring the rest of the
+/// analysis.
+pub fn choose(block: &[u8]) -> Filter {
+    analyze(block).filter
 }
 
 /// Is there enough branch-shaped data here for the x86 filter to be worth a
@@ -342,6 +375,34 @@ mod tests {
             code[i + 4] = 0x00;
         }
         assert!(looks_like_code(&code), "dense near-calls must be detected");
+    }
+
+    #[test]
+    fn already_compressed_data_is_recognised() {
+        let mut rng = Rng(0xABCDEF);
+        // Random bytes stand in for the payload of a video, JPEG or archive:
+        // high entropy with no structure left to find.
+        let noise: Vec<u8> = (0..2_000_000).map(|_| rng.byte()).collect();
+        let verdict = analyze(&noise);
+        assert!(verdict.incompressible, "high-entropy data should be recognised");
+        assert_eq!(verdict.filter, Filter::None);
+
+        // Real content must not be mistaken for it, or we would silently
+        // stop compressing.
+        let text = b"quantum compresses ordinary prose extremely well. ".repeat(40_000);
+        assert!(!analyze(&text).incompressible, "text must not be written off");
+        let mut code: Vec<u8> = (0..500_000).map(|_| rng.byte()).collect();
+        for i in (0..code.len() - 8).step_by(40) {
+            code[i] = 0xE8;
+            code[i + 4] = 0x00;
+        }
+        assert!(!analyze(&code).incompressible, "executables must not be written off");
+
+        // Mixed content: half incompressible, half prose. The compressible
+        // half is worth having, so this must not be written off either.
+        let mut mixed: Vec<u8> = (0..1_000_000).map(|_| rng.byte()).collect();
+        mixed.extend_from_slice(&b"the compressible half of the block. ".repeat(28_000));
+        assert!(!analyze(&mixed).incompressible, "mixed blocks must still be modelled");
     }
 
     #[test]

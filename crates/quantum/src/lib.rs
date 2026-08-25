@@ -40,14 +40,17 @@
 //!
 //! [`block::pack`] applies a preprocessing filter, compresses, and falls back
 //! to storing the data verbatim if that came out no smaller -- so
-//! incompressible input never grows.
+//! incompressible input never grows. By default it also declines to model a
+//! block that a cheap sample says is already compressed, which is what keeps
+//! archiving a directory of video from taking minutes per file to save
+//! nothing.
 //!
 //! ```
 //! use quantum::{Config, block};
 //!
 //! let cfg = Config::new(5);
 //! let data = b"hello hello hello hello hello".repeat(100);
-//! let packed = block::pack(&data, &cfg, None);
+//! let packed = block::pack(&data, &cfg, None, block::Effort::default());
 //! assert!(packed.data.len() < data.len() / 20);
 //! assert_eq!(block::unpack(&packed, &cfg)?, data);
 //! # Ok::<(), quantum::Error>(())

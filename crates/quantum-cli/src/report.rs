@@ -44,8 +44,13 @@ pub fn creation_summary(stats: &Stats, elapsed: Duration) {
     let raw = stats.raw_bytes;
     let archive = stats.archive_bytes;
     eprintln!();
-    eprintln!("  input      {:>12}  ({} files, {} dirs, {} links)",
-        format_bytes(raw), stats.files, stats.dirs, stats.symlinks);
+    eprintln!(
+        "  input      {:>12}  ({} files, {} dirs, {} links)",
+        format_bytes(raw),
+        stats.files,
+        stats.dirs,
+        stats.symlinks
+    );
     if stats.deduped_bytes > 0 {
         let unique = raw.saturating_sub(stats.deduped_bytes);
         eprintln!(
@@ -55,8 +60,11 @@ pub fn creation_summary(stats: &Stats, elapsed: Duration) {
             format_bytes(unique)
         );
     }
-    eprintln!("  archive    {:>12}  (index {})",
-        format_bytes(archive), format_bytes(stats.metadata_bytes));
+    eprintln!(
+        "  archive    {:>12}  (index {})",
+        format_bytes(archive),
+        format_bytes(stats.metadata_bytes)
+    );
     if raw > 0 {
         eprintln!(
             "  ratio      {:>12}  ({:.3} bits/byte, saved {:.1}%)",
@@ -65,7 +73,25 @@ pub fn creation_summary(stats: &Stats, elapsed: Duration) {
             100.0 - archive as f64 * 100.0 / raw as f64
         );
     }
-    eprintln!("  took       {:>12}  ({})", format_duration(elapsed), rate(raw, elapsed));
+    eprintln!(
+        "  took       {:>12}  ({}, {} thread(s), {} memory)",
+        format_duration(elapsed),
+        rate(raw, elapsed),
+        stats.threads,
+        format_bytes(stats.memory_bytes)
+    );
+    if stats.mostly_incompressible() {
+        eprintln!();
+        eprintln!(
+            "  {} of {} blocks were already compressed and were stored as-is.",
+            stats.stored_blocks, stats.total_blocks
+        );
+        eprintln!(
+            "  Video, audio, images and existing archives carry their own\n  \
+             compression; no general-purpose compressor can shrink them\n  \
+             meaningfully. A near-1.00x ratio here is the data, not a fault."
+        );
+    }
 }
 
 pub fn listing(archive: &Archive, verbose: bool) {

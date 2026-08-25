@@ -65,7 +65,7 @@ fn forge_archive(tmp: &TempDir, evil_path: &str) -> PathBuf {
     victim.path = evil_path.to_string();
 
     let raw = meta.encode();
-    let repacked = block::pack(&raw, &cfg, None);
+    let repacked = block::pack(&raw, &cfg, None, block::Effort::Always);
     let mut out = bytes[..footer.meta_offset as usize].to_vec();
     out.extend_from_slice(&repacked.data);
     out.extend_from_slice(

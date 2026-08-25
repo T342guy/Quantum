@@ -382,7 +382,7 @@ fn raw_stream_matches_the_archive_codec() {
         let data = rng.prose(len);
         for level in [1u8, 5, 9] {
             let cfg = Config::new(level);
-            let packed = block::pack(&data, &cfg, None);
+            let packed = block::pack(&data, &cfg, None, block::Effort::Adaptive);
             let framed = block::write_raw(&packed, level);
             let (back, got_level) = block::read_raw(&framed).unwrap();
             assert_eq!(got_level, level);

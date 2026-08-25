@@ -30,6 +30,9 @@ OPTIONS
         --no-dedup          Skip deduplication (slightly faster, usually bigger)
         --no-sort           Keep input order instead of grouping like files
         --filter <f>        auto | none | x86 | delta:N [default: auto]
+        --force-compress    Model every block, even ones that look already
+                            compressed (video, images, other archives). Costs
+                            minutes per gigabyte and usually gains under 1%
     -k, --keep-going        Report and skip unreadable inputs
     -f, --force             Overwrite existing files
     -v, --verbose           List each entry as it is processed
@@ -70,6 +73,7 @@ pub struct Args {
     pub dedup: bool,
     pub sort: bool,
     pub filter: Option<String>,
+    pub force_compress: bool,
     pub keep_going: bool,
     pub force: bool,
     pub verbose: bool,
@@ -89,6 +93,7 @@ impl Default for Args {
             dedup: true,
             sort: true,
             filter: None,
+            force_compress: false,
             keep_going: false,
             force: false,
             verbose: false,
@@ -186,6 +191,7 @@ pub fn parse<I: Iterator<Item = String>>(argv: I) -> Result<Parsed, String> {
                 args.block_size = Some(parse_size(&take_value("--block-size")?)?)
             }
             "--filter" => args.filter = Some(take_value("--filter")?),
+            "--force-compress" => args.force_compress = true,
             "--no-dedup" => args.dedup = false,
             "--no-sort" => args.sort = false,
             "-k" | "--keep-going" => args.keep_going = true,
@@ -256,6 +262,15 @@ mod tests {
         assert_eq!(a.level, Some(7));
         assert_eq!(a.block_size, Some(32 * 1024 * 1024));
         assert!(a.verbose && a.force);
+    }
+
+    #[test]
+    fn force_compress_is_distinct_from_force() {
+        let a = parse_ok(&["create", "--force-compress", "-f", "a.quantum", "x"]);
+        assert!(a.force_compress, "--force-compress should set its own flag");
+        assert!(a.force, "-f should still mean overwrite");
+        let b = parse_ok(&["create", "-f", "a.quantum", "x"]);
+        assert!(!b.force_compress, "-f alone must not force compression");
     }
 
     #[test]
