@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/quantum", "crates/quantum-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/t342guy/quantum"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# Fast to build, still optimised: used for tests and for profiling
+# iterations, where full LTO would dominate the edit-run cycle.
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+panic = "unwind"
+debug = 1
