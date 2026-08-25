@@ -1,0 +1,17 @@
+[package]
+name = "quantum-compress"
+description = "A context-mixing compressor and content-addressed archive format (.quantum)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["compression", "archive", "context-mixing", "cm", "deduplication"]
+categories = ["compression"]
+
+[lib]
+name = "quantum"
+path = "src/lib.rs"
+
+[dependencies]

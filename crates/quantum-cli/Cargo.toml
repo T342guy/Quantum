@@ -1,0 +1,15 @@
+[package]
+name = "quantum-cli"
+description = "CLI for the .quantum archive format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "quantum"
+path = "src/main.rs"
+
+[dependencies]
+quantum-compress = { path = "../quantum", version = "0.1.0" }
