@@ -1,6 +1,7 @@
 //! Human-readable output.
 
 use quantum::archive::{Archive, Kind, Stats};
+use std::collections::HashMap;
 use std::time::Duration;
 
 pub fn format_bytes(n: u64) -> String {
@@ -130,6 +131,102 @@ pub fn listing(archive: &Archive, verbose: bool) {
             format_bytes(total),
             format_bytes(archive.archive_bytes()),
             total as f64 / archive.archive_bytes().max(1) as f64);
+    }
+}
+
+/// The detailed view: where the bytes actually went.
+///
+/// This exists to answer "why is my archive this big?" without guesswork --
+/// it shows which blocks refused to compress and which files are responsible.
+pub fn info_verbose(archive: &Archive) {
+    let blocks = archive.block_report();
+    println!();
+    println!("BLOCKS");
+    println!("{:>5} {:>12} {:>12} {:>8} {:>8}  {}", "#", "raw", "stored", "ratio", "filter", "method");
+    let mut stored_raw = 0u64;
+    for b in &blocks {
+        println!(
+            "{:>5} {:>12} {:>12} {:>7.2}x {:>8}  {}",
+            b.index,
+            format_bytes(b.raw_len),
+            format_bytes(b.comp_len),
+            b.raw_len as f64 / b.comp_len.max(1) as f64,
+            b.filter,
+            if b.stored { "stored (would not compress)" } else { "context-mixed" }
+        );
+        if b.stored {
+            stored_raw += b.raw_len;
+        }
+    }
+    if stored_raw > 0 {
+        let total: u64 = blocks.iter().map(|b| b.raw_len).sum();
+        println!();
+        println!(
+            "  {} of {} ({:.0}%) would not compress and was stored verbatim.",
+            format_bytes(stored_raw),
+            format_bytes(total),
+            stored_raw as f64 * 100.0 / total.max(1) as f64
+        );
+    }
+
+    // Which file types are costing the space.
+    let sizes = archive.size_attribution();
+    let mut by_ext: HashMap<String, (u64, u64, u64)> = HashMap::new();
+    for (entry, &packed) in archive.entries().iter().zip(&sizes) {
+        if entry.kind != Kind::File {
+            continue;
+        }
+        let ext = entry
+            .path
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            // A version suffix such as `python3.13` is not a file type.
+            .filter(|e| {
+                e.len() <= 8
+                    && e.chars().all(|c| c.is_ascii_alphanumeric())
+                    && !e.chars().all(|c| c.is_ascii_digit())
+            })
+            .unwrap_or_else(|| "(none)".into());
+        let slot = by_ext.entry(ext).or_default();
+        slot.0 += entry.size;
+        slot.1 += packed;
+        slot.2 += 1;
+    }
+    let mut rows: Vec<_> = by_ext.into_iter().collect();
+    rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.1));
+    println!();
+    println!("BY EXTENSION");
+    println!("{:<12} {:>7} {:>12} {:>12} {:>8}", "ext", "files", "raw", "stored", "ratio");
+    for (ext, (raw, packed, count)) in rows.iter().take(15) {
+        println!(
+            "{:<12} {:>7} {:>12} {:>12} {:>7.2}x",
+            ext,
+            count,
+            format_bytes(*raw),
+            format_bytes(*packed),
+            *raw as f64 / (*packed).max(1) as f64
+        );
+    }
+
+    // And the individual files, worst first.
+    let mut worst: Vec<_> = archive
+        .entries()
+        .iter()
+        .zip(&sizes)
+        .filter(|(e, _)| e.kind == Kind::File && e.size > 0)
+        .collect();
+    worst.sort_by_key(|(_, packed)| std::cmp::Reverse(**packed));
+    println!();
+    println!("LARGEST IN THE ARCHIVE");
+    println!("{:>12} {:>12} {:>8}  {}", "raw", "stored", "ratio", "path");
+    for (entry, packed) in worst.iter().take(15) {
+        println!(
+            "{:>12} {:>12} {:>7.2}x  {}",
+            format_bytes(entry.size),
+            format_bytes(**packed),
+            entry.size as f64 / (**packed).max(1) as f64,
+            entry.path
+        );
     }
 }
 

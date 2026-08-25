@@ -21,7 +21,7 @@ mod writer;
 use std::path::{Path, PathBuf};
 
 pub use format::{Entry, Kind, Metadata};
-pub use reader::Archive;
+pub use reader::{Archive, BlockInfo};
 
 use crate::chunker::{self, ChunkSizes};
 use crate::codec::DEFAULT_LEVEL;

@@ -392,6 +392,41 @@ fn raw_stream_matches_the_archive_codec() {
 }
 
 #[test]
+fn accounting_adds_up() {
+    // The diagnostic has to be trustworthy: what it charges to files must
+    // match what the blocks actually cost.
+    let tmp = TempDir::new("accounting");
+    let src = tmp.join("src");
+    let mut rng = Rng::new(4242);
+    build_tree(&src, &mut rng);
+
+    let path = tmp.join("a.quantum");
+    let opts = Options { level: 2, block_size: 1 << 19, ..Default::default() };
+    archive::create(&path, &[src.clone()], &opts, &mut silent()).unwrap();
+    let a = archive::open(&path).unwrap();
+
+    let blocks = a.block_report();
+    assert_eq!(blocks.len(), a.block_count());
+    let block_raw: u64 = blocks.iter().map(|b| b.raw_len).sum();
+    let block_comp: u64 = blocks.iter().map(|b| b.comp_len).sum();
+    assert!(block_comp < a.archive_bytes());
+
+    // Every chunk is charged exactly once, so the attribution should sum to
+    // the compressed size of the data blocks.
+    let charged: u64 = a.size_attribution().iter().sum();
+    let slack = block_comp / 50 + 1024;
+    assert!(
+        charged.abs_diff(block_comp) <= slack,
+        "attribution {charged} does not match block total {block_comp}"
+    );
+
+    // And the raw side must account for the deduplicated total, not the
+    // input total: shared chunks are stored once.
+    let unique: u64 = a.total_size() - a.deduplicated_bytes();
+    assert_eq!(block_raw, unique, "blocks should hold exactly the unique bytes");
+}
+
+#[test]
 fn archives_are_reproducible() {
     let tmp = TempDir::new("repro");
     let src = tmp.join("src");

@@ -93,6 +93,31 @@ yourself.
 The corollary is worth stating: point Quantum at source trees, logs,
 databases, documents, mail, VM images, firmware — not at your media library.
 
+### Is it worth it?
+
+Often, no. The advantage depends almost entirely on how text-like the data
+is, and the headline "5% better than `tar.xz`" is the *worst* case, from a
+tree that was two thirds executables and gzipped docs:
+
+| What you are compressing | vs `xz -9e` | Verdict |
+|---|---:|---|
+| Text, source, logs, JSON, XML | 21–32% smaller | Clearly worth it |
+| Mixed source tree | 10–20% smaller | Usually worth it |
+| OS tree, mostly binaries | ~5% smaller | Probably not |
+| Video, audio, images, archives | 0% | No — and it now says so and exits quickly |
+
+A useful rule: if `xz` already gets your data below about 2 bits/byte, there
+is real structure left and Quantum will find a fifth of it again. If `xz` is
+stuck near 8, nothing will help. In between, `tar.xz` is a perfectly good
+answer and switching for a few percent is not obviously rational — spending
+3× the memory and 1.4× the time to save 5% is a trade you should make
+deliberately, not by default.
+
+Where it does earn its keep is where size is the recurring cost and CPU is
+not: archives written once and stored for years, artifacts shipped over
+metered links, backups of text-shaped data. `quantum info -v` will tell you
+which case you are in for your own data before you commit to it.
+
 ### The honest part
 
 Quantum is **slow**: about 1 MB/s per core at level 5, against 2 MB/s for

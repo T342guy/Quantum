@@ -214,6 +214,9 @@ fn info(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let (path, _) = archive_and_inputs(args)?;
     let archive = archive::open(&path)?;
     report::info(&archive);
+    if args.verbose {
+        report::info_verbose(&archive);
+    }
     Ok(())
 }
 

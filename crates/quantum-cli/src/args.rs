@@ -15,7 +15,7 @@ COMMANDS
     create   <archive> <path>...   Build an archive from files and directories
     extract  <archive> [path]...   Restore an archive (all of it, or just some paths)
     list     <archive>             Show what is inside
-    info     <archive>             Show format, sizes and how the space was spent
+    info     <archive>             Show format and sizes (-v: where every byte went)
     test     <archive>             Decode everything and verify every checksum
     compress    [file]             Compress one stream (stdin/stdout by default)
     decompress  [file]             Reverse `compress`

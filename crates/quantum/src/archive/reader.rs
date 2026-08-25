@@ -17,6 +17,18 @@ use crate::filters::Filter;
 use crate::hash::Sha256;
 use crate::parallel::Pipeline;
 
+/// How one block turned out.
+#[derive(Clone, Debug)]
+pub struct BlockInfo {
+    pub index: usize,
+    pub raw_len: u64,
+    pub comp_len: u64,
+    pub chunks: u64,
+    /// Written verbatim, because compressing it did not help.
+    pub stored: bool,
+    pub filter: String,
+}
+
 pub struct Archive {
     path: PathBuf,
     header: Header,
@@ -83,6 +95,61 @@ impl Archive {
 
     pub fn entries(&self) -> &[Entry] {
         &self.meta.entries
+    }
+
+    /// Per-block accounting: what each block cost and how it was handled.
+    pub fn block_report(&self) -> Vec<BlockInfo> {
+        self.meta
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, b)| BlockInfo {
+                index,
+                raw_len: b.raw_len,
+                comp_len: b.comp_len,
+                chunks: b.n_chunks,
+                stored: b.method == 0,
+                filter: Filter::from_byte(b.filter)
+                    .map(|f| f.name())
+                    .unwrap_or_else(|_| "?".into()),
+            })
+            .collect()
+    }
+
+    /// Compressed bytes attributable to each entry, in entry order.
+    ///
+    /// A file's chunks are spread across blocks and share them with other
+    /// files, so its share of a block is charged in proportion to the bytes
+    /// it contributed. Deduplicated chunks are charged to whichever file is
+    /// holding them, which is what makes the total add up.
+    pub fn size_attribution(&self) -> Vec<u64> {
+        // Charge each chunk its block's compression ratio.
+        let mut per_chunk = vec![0f64; self.meta.chunk_lens.len()];
+        for (c, slot) in per_chunk.iter_mut().enumerate() {
+            let block = &self.meta.blocks[self.chunk_block[c] as usize];
+            let ratio = if block.raw_len == 0 {
+                0.0
+            } else {
+                block.comp_len as f64 / block.raw_len as f64
+            };
+            *slot = self.meta.chunk_lens[c] as f64 * ratio;
+        }
+        // A chunk shared by several files is charged once, to the first.
+        let mut charged = vec![false; per_chunk.len()];
+        self.meta
+            .entries
+            .iter()
+            .map(|e| {
+                let mut total = 0f64;
+                for &c in &e.chunks {
+                    if !charged[c as usize] {
+                        charged[c as usize] = true;
+                        total += per_chunk[c as usize];
+                    }
+                }
+                total as u64
+            })
+            .collect()
     }
 
     pub fn level(&self) -> u8 {
