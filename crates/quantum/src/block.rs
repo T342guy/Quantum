@@ -4,7 +4,7 @@
 //! is what makes compression and extraction parallel, and what lets a reader
 //! decode one file without touching the rest of the archive.
 
-use crate::codec::{Config, compress_block, decompress_block};
+use crate::codec::{Config, check_block_len, compress_block, decompress_block};
 use crate::error::{Error, Result};
 use crate::filters::Filter;
 use crate::hash::fast_hash;
@@ -85,7 +85,10 @@ pub fn unpack(packed: &Packed, cfg: &Config) -> Result<Vec<u8>> {
             }
             packed.data.clone()
         }
-        Method::Cm => decompress_block(&packed.data, packed.raw_len, cfg)?,
+        Method::Cm => {
+            check_block_len(packed.data.len(), packed.raw_len)?;
+            decompress_block(&packed.data, packed.raw_len, cfg)?
+        }
     };
     packed.filter.unapply(&mut out);
     if fast_hash(&out, 0) != packed.checksum {

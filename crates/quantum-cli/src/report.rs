@@ -4,7 +4,7 @@ use quantum::archive::{Archive, Kind, Stats};
 use std::time::Duration;
 
 pub fn format_bytes(n: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     if n < 1024 {
         return format!("{n} B");
     }
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(format_bytes(1536), "1.5 KiB");
         assert_eq!(format_bytes(200 * 1024), "200 KiB");
         assert_eq!(format_bytes(1024 * 1024 * 3), "3.0 MiB");
-        assert_eq!(format_bytes(u64::MAX), "16 EiB".replace("EiB", "PiB"));
+        assert_eq!(format_bytes(u64::MAX), "16.0 EiB");
     }
 
     #[test]

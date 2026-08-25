@@ -132,19 +132,49 @@ impl Default for Config {
 /// Number of previous bytes hashed by the match model.
 const MATCH_CTX_BYTES: u32 = 6;
 
+impl Ctx {
+    /// Hash of this model's view of the past. `c8` holds the previous eight
+    /// bytes with the most recent in the low byte.
+    #[inline(always)]
+    fn hash(self, c8: u64, word: u64, prev_word: u64) -> u64 {
+        let h = match self {
+            Ctx::Order(n) => {
+                let bits = 8 * n as u32;
+                let masked = if bits >= 64 { c8 } else { c8 & ((1u64 << bits) - 1) };
+                mix(masked, 0x100 + n as u64)
+            }
+            Ctx::Word => mix(word, 0x201),
+            Ctx::WordPrev => mix(mix(prev_word, word), 0x202),
+            Ctx::Sparse13 => mix((c8 & 0xFF) | ((c8 >> 8) & 0xFF00), 0x301),
+            Ctx::Skip1 => mix((c8 >> 8) & 0xFF_FFFF, 0x302),
+        };
+        finalize(h)
+    }
+}
+
+/// One context model: its statistics, and where in them it is currently
+/// looking. Keeping these together means the per-bit loop walks one array
+/// instead of indexing four in lockstep.
+struct CtxModel {
+    spec: Ctx,
+    table: BucketTable,
+    map: StateMap,
+    /// Context hash for the byte being coded.
+    hash: u64,
+    /// Base index of the bucket in use.
+    bucket: usize,
+    /// State read during `predict`, needed again in `learn`.
+    state: u8,
+}
+
 /// The predictor: all models plus the machinery that combines them.
 struct Model {
-    cfg_models: Vec<Ctx>,
-    tables: Vec<BucketTable>,
-    maps: Vec<StateMap>,
-    /// Context hash of the current byte, one per model.
-    ctx_hash: Vec<u64>,
-    /// Base index of the bucket currently in use, one per model.
-    bucket: Vec<usize>,
+    models: Vec<CtxModel>,
 
     /// Order-1 states, indexed directly by `(c1 << 8) | c0` -- no hashing, so
     /// no collisions, for the model that is consulted most often.
     order1: Vec<u8>,
+    order1_slot: usize,
     map0: StateMap,
     map1: StateMap,
 
@@ -164,9 +194,6 @@ struct Model {
     prev_word: u64,
 
     hist: Vec<u8>,
-    /// Scratch: states read during `predict`, reused by `learn`.
-    seen: Vec<u8>,
-    mix_pr: i32,
 }
 
 const NIBBLE_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -176,13 +203,22 @@ impl Model {
         let n_models = cfg.models.len();
         // order-0, order-1, each context model, two match inputs, bias.
         let inputs = 2 + n_models + 2 + 1;
+        let table_bytes = cfg.table_bytes(expected_len);
         let mut m = Model {
-            cfg_models: cfg.models.clone(),
-            tables: (0..n_models).map(|_| BucketTable::new(cfg.table_bytes(expected_len))).collect(),
-            maps: (0..n_models).map(|_| StateMap::new(256, 1023)).collect(),
-            ctx_hash: vec![0; n_models],
-            bucket: vec![0; n_models],
+            models: cfg
+                .models
+                .iter()
+                .map(|&spec| CtxModel {
+                    spec,
+                    table: BucketTable::new(table_bytes),
+                    map: StateMap::new(256, 1023),
+                    hash: 0,
+                    bucket: 0,
+                    state: 0,
+                })
+                .collect(),
             order1: vec![0u8; 1 << 16],
+            order1_slot: 1,
             map0: StateMap::new(256, 1023),
             map1: StateMap::new(256, 1023),
             matcher: MatchModel::new(cfg.match_bits(expected_len)),
@@ -198,51 +234,30 @@ impl Model {
             word: 0,
             prev_word: 0,
             hist: Vec::with_capacity(expected_len),
-            seen: vec![0u8; n_models],
-            mix_pr: 2048,
         };
         m.begin_byte();
         m
     }
 
-    /// Context hash for model `i` over the current history.
-    fn hash_for(&self, ctx: Ctx) -> u64 {
-        let h = match ctx {
-            Ctx::Order(n) => {
-                let bits = 8 * n as u32;
-                let masked = if bits >= 64 { self.c8 } else { self.c8 & ((1u64 << bits) - 1) };
-                mix(masked, 0x100 + n as u64)
-            }
-            Ctx::Word => mix(self.word, 0x201),
-            Ctx::WordPrev => mix(mix(self.prev_word, self.word), 0x202),
-            Ctx::Sparse13 => mix((self.c8 & 0xFF) | ((self.c8 >> 8) & 0xFF00), 0x301),
-            Ctx::Skip1 => mix((self.c8 >> 8) & 0xFF_FFFF, 0x302),
-        };
-        finalize(h)
-    }
-
     /// Start a new byte: recompute every context hash and look up its bucket.
     fn begin_byte(&mut self) {
-        for i in 0..self.cfg_models.len() {
-            self.ctx_hash[i] = self.hash_for(self.cfg_models[i]);
-            self.bucket[i] = self.tables[i].find(self.ctx_hash[i]);
+        let (c8, word, prev) = (self.c8, self.word, self.prev_word);
+        for m in &mut self.models {
+            m.hash = m.spec.hash(c8, word, prev);
+            m.bucket = m.table.find(m.hash);
         }
         self.node = 1;
+        self.order1_slot = (((c8 & 0xFF) as usize) << 8) | self.c0 as usize;
     }
 
     /// Start the low nibble: the high nibble is now known, so it joins the
     /// context and every model re-enters the table.
     fn begin_low_nibble(&mut self) {
-        for i in 0..self.cfg_models.len() {
-            let h = finalize(self.ctx_hash[i] ^ (self.c0 as u64).wrapping_mul(NIBBLE_SALT));
-            self.bucket[i] = self.tables[i].find(h);
+        let salted = (self.c0 as u64).wrapping_mul(NIBBLE_SALT);
+        for m in &mut self.models {
+            m.bucket = m.table.find(finalize(m.hash ^ salted));
         }
         self.node = 1;
-    }
-
-    #[inline(always)]
-    fn order1_slot(&self) -> usize {
-        (((self.c8 & 0xFF) as usize) << 8) | self.c0 as usize
     }
 
     /// Probability that the next bit is a 1, on a 16-bit scale.
@@ -251,14 +266,14 @@ impl Model {
         self.mixer.set_context(self.c0 as usize * 3 + self.matcher.confidence());
         self.mixer.add(stretch(self.map0.p(self.c0 as usize)));
 
-        let s1 = self.order1[self.order1_slot()];
+        let s1 = self.order1[self.order1_slot];
         self.mixer.add(stretch(self.map1.p(s1 as usize)));
 
-        for i in 0..self.cfg_models.len() {
-            let state = self.tables[i].state(self.bucket[i] + self.node);
-            self.seen[i] = state;
-            let p = self.maps[i].p(state as usize);
-            self.mixer.add(stretch(p));
+        let node = self.node;
+        for m in &mut self.models {
+            let state = m.table.state(m.bucket + node);
+            m.state = state;
+            self.mixer.add(stretch(m.map.p(state as usize)));
         }
 
         let (m1, m2) = self.matcher.predict(&self.hist, self.c0, self.bpos);
@@ -268,7 +283,6 @@ impl Model {
         self.mixer.add(256);
 
         let pr = self.mixer.mix();
-        self.mix_pr = pr;
 
         // Two rounds of secondary estimation. Each is averaged 3:1 with its
         // input so a cold map cannot make things worse. From here on the
@@ -278,8 +292,9 @@ impl Model {
         let refined = self.apm_c0.refine(pr, self.c0 as usize);
         let p16 = (pr16 + refined * 3) >> 2;
 
-        let cx = (((self.c8 & 0xFF) as usize) << 8) | self.c0 as usize;
-        let refined2 = self.apm_order1.refine(((p16 >> 4) as i32).clamp(0, 4095), cx);
+        let refined2 = self
+            .apm_order1
+            .refine(((p16 >> 4) as i32).clamp(0, 4095), self.order1_slot);
         let p16 = (p16 + refined2 * 3) >> 2;
 
         p16.clamp(1, 65535) as u16
@@ -290,14 +305,13 @@ impl Model {
     fn learn(&mut self, bit: u32) {
         self.map0.update(bit);
         self.map1.update(bit);
-        let slot = self.order1_slot();
+        let slot = self.order1_slot;
         self.order1[slot] = STATES.next(self.order1[slot], bit);
 
-        for i in 0..self.cfg_models.len() {
-            self.maps[i].update(bit);
-            let next = STATES.next(self.seen[i], bit);
-            let slot = self.bucket[i] + self.node;
-            self.tables[i].set_state(slot, next);
+        let node = self.node;
+        for m in &mut self.models {
+            m.map.update(bit);
+            m.table.set_state(m.bucket + node, STATES.next(m.state, bit));
         }
         self.matcher.update(bit);
         self.mixer.update(bit);
@@ -310,6 +324,10 @@ impl Model {
             8 => self.end_byte(),
             4 => self.begin_low_nibble(),
             _ => self.node = self.node * 2 + bit as usize,
+        }
+        // The order-1 slot follows `c0` within the byte; `begin_byte` resets it.
+        if self.bpos != 0 {
+            self.order1_slot = (((self.c8 & 0xFF) as usize) << 8) | self.c0 as usize;
         }
     }
 
@@ -350,9 +368,34 @@ pub fn compress_block(input: &[u8], cfg: &Config) -> Vec<u8> {
     enc.finish()
 }
 
+/// Largest expansion the coder can produce, as a multiple of the compressed
+/// size.
+///
+/// Probabilities are clamped to `1..=65535`, so a bit costs at least
+/// `-log2(65535/65536)` bits and one compressed byte can stand for at most
+/// about 45,000 original bytes. Rounding that up to 65,536 gives a bound that
+/// no honest stream can reach, which makes it a safe sanity check on a length
+/// read out of an untrusted file -- and stops a forged length from asking for
+/// an impossible allocation.
+const MAX_EXPANSION: usize = 1 << 16;
+
+/// Absolute ceiling on one decoded block, as a second line of defence.
+const MAX_BLOCK_LEN: usize = 1 << 33;
+
+/// Reject a claimed decompressed length that this coder could not have
+/// produced from `comp_len` bytes.
+pub fn check_block_len(comp_len: usize, out_len: usize) -> Result<()> {
+    let ceiling = comp_len.saturating_add(16).saturating_mul(MAX_EXPANSION);
+    if out_len > ceiling || out_len > MAX_BLOCK_LEN {
+        return Err(Error::Corrupt("block claims a decompressed size it cannot have"));
+    }
+    Ok(())
+}
+
 /// Decompress one block. `out_len` is the original length, which the
 /// container stores alongside the block.
 pub fn decompress_block(data: &[u8], out_len: usize, cfg: &Config) -> Result<Vec<u8>> {
+    check_block_len(data.len(), out_len)?;
     let mut model = Model::new(cfg, out_len);
     let mut dec = Decoder::new(data);
     for _ in 0..out_len {

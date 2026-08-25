@@ -22,30 +22,37 @@ pub struct StateTable {
     weight: [u8; 256],
 }
 
-impl StateTable {
-    fn build() -> Self {
-        let mut next = [[0u8; 2]; 256];
-        let mut weight = [0u8; 256];
-        for s in 0..256usize {
-            let n0 = (s >> 4) as u32;
-            let n1 = (s & 15) as u32;
-            weight[s] = (n0 + n1) as u8;
-            for bit in 0..2usize {
-                let (mut a, mut b) = if bit == 1 { (n1, n0) } else { (n0, n1) };
-                a = (a + 1).min(15);
-                if b > 2 {
-                    b = 2 + (b - 2) / 2;
-                }
-                let (n0, n1) = if bit == 1 { (b, a) } else { (a, b) };
-                next[s][bit] = ((n0 << 4) | n1) as u8;
+const fn build_states() -> StateTable {
+    let mut next = [[0u8; 2]; 256];
+    let mut weight = [0u8; 256];
+    let mut s = 0usize;
+    while s < 256 {
+        let n0 = (s >> 4) as u32;
+        let n1 = (s & 15) as u32;
+        weight[s] = (n0 + n1) as u8;
+        let mut bit = 0usize;
+        while bit < 2 {
+            let (mut a, mut b) = if bit == 1 { (n1, n0) } else { (n0, n1) };
+            a += 1;
+            if a > 15 {
+                a = 15;
             }
+            if b > 2 {
+                b = 2 + (b - 2) / 2;
+            }
+            let (n0, n1) = if bit == 1 { (b, a) } else { (a, b) };
+            next[s][bit] = ((n0 << 4) | n1) as u8;
+            bit += 1;
         }
-        StateTable { next, weight }
+        s += 1;
     }
+    StateTable { next, weight }
+}
 
+impl StateTable {
     #[inline(always)]
     pub fn next(&self, state: u8, bit: u32) -> u8 {
-        self.next[state as usize][bit as usize]
+        self.next[state as usize][(bit & 1) as usize]
     }
 
     #[inline(always)]
@@ -54,7 +61,8 @@ impl StateTable {
     }
 }
 
-pub static STATES: std::sync::LazyLock<StateTable> = std::sync::LazyLock::new(StateTable::build);
+/// Evaluated at compile time: this is consulted several times per coded bit.
+pub static STATES: StateTable = build_states();
 
 // ---------------------------------------------------------------------------
 // StateMap
@@ -63,13 +71,17 @@ pub static STATES: std::sync::LazyLock<StateTable> = std::sync::LazyLock::new(St
 /// Adaptation rates: entry `n` is `65536 / (n + 1.5)`, so a counter that has
 /// seen `n` observations moves by `1 / (n + 1.5)` of the remaining error.
 /// Early observations move fast, later ones settle into a running average.
-static RATE: std::sync::LazyLock<[i64; 1024]> = std::sync::LazyLock::new(|| {
+const fn build_rates() -> [i64; 1024] {
     let mut t = [0i64; 1024];
-    for (n, slot) in t.iter_mut().enumerate() {
-        *slot = (131072.0 / (2.0 * n as f64 + 3.0)) as i64;
+    let mut n = 0usize;
+    while n < 1024 {
+        t[n] = 131072 / (2 * n as i64 + 3);
+        n += 1;
     }
     t
-});
+}
+
+static RATE: [i64; 1024] = build_rates();
 
 /// Maps a small context (typically a bit history state) to a probability,
 /// learned online.
@@ -77,38 +89,50 @@ static RATE: std::sync::LazyLock<[i64; 1024]> = std::sync::LazyLock::new(|| {
 /// Each slot packs a 22-bit probability and a 10-bit observation count.
 pub struct StateMap {
     t: Vec<u32>,
+    /// `t.len() - 1`; sizes are powers of two so a mask replaces a bounds
+    /// check in a function called about a dozen times per coded bit.
+    mask: usize,
     cxt: usize,
-    limit: usize,
+    limit: u32,
 }
 
+/// Probabilities are held to 22 bits inside a slot, with the low 10 bits
+/// carrying the observation count.
 const P_MAX: i64 = (1 << 22) - 1;
 
 impl StateMap {
-    /// `n` contexts, `limit` caps the observation count (and so the minimum
-    /// adaptation rate). Lower limits track non-stationary data better.
-    pub fn new(n: usize, limit: usize) -> Self {
+    /// `n` contexts (a power of two), `limit` caps the observation count and
+    /// so the minimum adaptation rate. Lower limits track non-stationary data
+    /// better; higher ones give steadier estimates.
+    pub fn new(n: usize, limit: u32) -> Self {
+        assert!(n.is_power_of_two(), "state map size {n} must be a power of two");
         assert!(limit < 1024);
         // Probability 1/2 (bits 10..32), observation count 0 (bits 0..10).
-        StateMap { t: vec![1u32 << 31; n], cxt: 0, limit }
+        StateMap { t: vec![1u32 << 31; n], mask: n - 1, cxt: 0, limit }
     }
 
     /// Predict for context `cx`; returns a 12-bit probability.
     #[inline(always)]
     pub fn p(&mut self, cx: usize) -> i32 {
-        debug_assert!(cx < self.t.len());
-        self.cxt = cx;
-        (self.t[cx] >> 20) as i32
+        debug_assert!(cx <= self.mask, "context {cx} is outside this state map");
+        self.cxt = cx & self.mask;
+        (self.t[self.cxt] >> 20) as i32
     }
 
+    /// Fold the observed bit into the estimate for the context last passed to
+    /// [`StateMap::p`].
     #[inline(always)]
     pub fn update(&mut self, bit: u32) {
-        let slot = &mut self.t[self.cxt];
-        let n = (*slot & 1023) as usize;
+        let slot = &mut self.t[self.cxt & self.mask];
+        let n = *slot & 1023;
         let p = (*slot >> 10) as i64;
         let target = if bit == 1 { P_MAX } else { 0 };
-        let p = p + (((target - p) * RATE[n]) >> 16);
+        // Moving a fraction 1/(n + 1.5) of the way keeps `p` inside
+        // `0..=P_MAX` for every reachable value, so no clamp is needed.
+        let p = p + (((target - p) * RATE[(n & 1023) as usize]) >> 16);
+        debug_assert!((0..=P_MAX).contains(&p), "state map probability escaped: {p}");
         let n = if n < self.limit { n + 1 } else { n };
-        *slot = ((p.clamp(0, P_MAX) as u32) << 10) | n as u32;
+        *slot = ((p as u32) << 10) | n;
     }
 }
 
@@ -122,10 +146,16 @@ impl StateMap {
 /// `p = squash(sum_i w_i * x_i)`, trained online by gradient descent on
 /// coding loss, which for this parameterisation is simply
 /// `w_i += lr * (bit - p) * x_i`.
+///
+/// Upper bound on mixer inputs, so they live in a fixed array rather than a
+/// heap vector that is pushed to and cleared for every single bit.
+pub const MAX_INPUTS: usize = 16;
+
 pub struct Mixer {
     n: usize,
     weights: Vec<i32>,
-    inputs: Vec<i32>,
+    inputs: [i32; MAX_INPUTS],
+    count: usize,
     base: usize,
     pr: i32,
     lr: i32,
@@ -133,21 +163,30 @@ pub struct Mixer {
 
 impl Mixer {
     pub fn new(n: usize, contexts: usize, lr: i32) -> Self {
+        assert!(n <= MAX_INPUTS, "mixer has {n} inputs, limit is {MAX_INPUTS}");
         Mixer {
             n,
             // Start as a plain average of the inputs.
             weights: vec![(1 << 16) / n as i32; n * contexts],
-            inputs: Vec::with_capacity(n),
+            inputs: [0; MAX_INPUTS],
+            count: 0,
             base: 0,
             pr: 2048,
             lr,
         }
     }
 
+    /// Add one stretched prediction.
+    ///
+    /// Callers must already be in `-2047..=2047`, which everything derived
+    /// from [`stretch`](super::tables::stretch) is by construction. Re-clamping
+    /// here cost several percent of total runtime for nothing.
     #[inline(always)]
     pub fn add(&mut self, x: i32) {
-        debug_assert!(self.inputs.len() < self.n);
-        self.inputs.push(x.clamp(-2047, 2047));
+        debug_assert!(self.count < self.n);
+        debug_assert!((-2047..=2047).contains(&x), "mixer input {x} is out of range");
+        self.inputs[self.count & (MAX_INPUTS - 1)] = x;
+        self.count += 1;
     }
 
     /// Select the weight vector to use for this prediction.
@@ -159,24 +198,29 @@ impl Mixer {
 
     #[inline(always)]
     pub fn mix(&mut self) -> i32 {
-        debug_assert_eq!(self.inputs.len(), self.n);
+        debug_assert_eq!(self.count, self.n);
         let w = &self.weights[self.base..self.base + self.n];
-        let mut dot: i64 = 0;
-        for i in 0..self.n {
-            dot += (w[i] as i64) * (self.inputs[i] as i64);
-        }
+        let x = &self.inputs[..self.n];
+        let dot: i64 = w.iter().zip(x).map(|(&w, &x)| w as i64 * x as i64).sum();
         self.pr = squash((dot >> 16) as i32);
         self.pr
     }
 
+    /// Gradient step on coding loss. For this parameterisation the gradient is
+    /// simply `(bit - p) * x`, which is why the update is one multiply-add per
+    /// input and no activation derivative appears.
     #[inline(always)]
     pub fn update(&mut self, bit: u32) {
         let err = (((bit as i32) << 12) - self.pr) * self.lr;
         let w = &mut self.weights[self.base..self.base + self.n];
-        for i in 0..self.n {
-            w[i] = (w[i] + ((self.inputs[i] * err + 0x8000) >> 16)).clamp(-(1 << 22), 1 << 22);
+        let x = &self.inputs[..self.n];
+        for (w, &x) in w.iter_mut().zip(x) {
+            // Saturating rather than clamped: gradient descent keeps these
+            // bounded on its own, and this only exists so that pathological
+            // input cannot overflow.
+            *w = w.saturating_add((x * err + 0x8000) >> 16);
         }
-        self.inputs.clear();
+        self.count = 0;
     }
 }
 
@@ -197,9 +241,16 @@ pub struct Apm {
 
 impl Apm {
     pub fn new(contexts: usize, rate: u32) -> Self {
-        let mut t = vec![0u16; contexts * 33];
-        for (i, slot) in t.iter_mut().enumerate() {
-            *slot = (squash(((i % 33) as i32 - 16) * 128) * 16) as u16;
+        // Every context starts with the same identity curve. Building it once
+        // and copying matters: a 64K-context map holds two million entries,
+        // and it is rebuilt for every block.
+        let mut seed = [0u16; 33];
+        for (i, slot) in seed.iter_mut().enumerate() {
+            *slot = (squash((i as i32 - 16) * 128) * 16) as u16;
+        }
+        let mut t = Vec::with_capacity(contexts * 33);
+        for _ in 0..contexts {
+            t.extend_from_slice(&seed);
         }
         Apm { t, cxt: 0, rate }
     }
@@ -231,7 +282,7 @@ mod tests {
 
     #[test]
     fn state_transitions_are_bounded_and_discount() {
-        let st = &*STATES;
+        let st = &STATES;
         // Feeding only ones saturates n1 and leaves n0 at zero.
         let mut s = 0u8;
         for _ in 0..64 {

@@ -45,10 +45,6 @@ impl MatchModel {
         }
     }
 
-    pub fn bytes(&self) -> usize {
-        self.index.len() * 4
-    }
-
     /// How confident the model currently is, bucketed for use as a mixer
     /// context: 0 = no match, 1 = short, 2 = long.
     #[inline(always)]
@@ -58,11 +54,6 @@ impl MatchModel {
             1..=15 => 1,
             _ => 2,
         }
-    }
-
-    #[inline(always)]
-    pub fn len(&self) -> u32 {
-        self.len
     }
 
     /// Called once per byte, after `hist` has been extended with the byte

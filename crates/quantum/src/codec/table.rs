@@ -24,6 +24,7 @@ impl BucketTable {
         BucketTable { t: vec![0u8; groups * GROUP], group_mask: groups - 1 }
     }
 
+    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.t.len()
     }

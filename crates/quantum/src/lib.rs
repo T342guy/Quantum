@@ -26,7 +26,9 @@ mod hash;
 mod parallel;
 mod varint;
 
-pub use codec::{Config, DEFAULT_LEVEL, MAX_LEVEL, MIN_LEVEL, compress_block, decompress_block};
+pub use codec::{
+    Config, DEFAULT_LEVEL, MAX_LEVEL, MIN_LEVEL, compress_block, decompress_block,
+};
 pub use error::{Error, Result};
 pub use hash::{Sha256, fast_hash};
 

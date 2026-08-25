@@ -75,11 +75,6 @@ impl Encoder {
         self.out.remove(0);
         self.out
     }
-
-    /// Bytes emitted so far (an approximation of the final size).
-    pub fn len(&self) -> usize {
-        self.out.len()
-    }
 }
 
 impl Default for Encoder {

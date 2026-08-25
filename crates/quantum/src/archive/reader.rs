@@ -11,7 +11,7 @@ use super::format::{
 };
 use super::{Event, ExtractOptions, Stats};
 use crate::block::{self, Packed};
-use crate::codec::Config;
+use crate::codec::{Config, check_block_len as quantum_check_len};
 use crate::error::{Error, Result};
 use crate::filters::Filter;
 use crate::hash::Sha256;
@@ -19,7 +19,6 @@ use crate::parallel::Pipeline;
 
 pub struct Archive {
     path: PathBuf,
-    file: File,
     header: Header,
     cfg: Config,
     meta: Metadata,
@@ -56,6 +55,7 @@ impl Archive {
         }
         let raw_len = usize::try_from(footer.meta_raw_len)
             .map_err(|_| Error::Corrupt("metadata is implausibly large"))?;
+        quantum_check_len(footer.meta_comp_len as usize, raw_len)?;
 
         let mut buf = vec![0u8; footer.meta_comp_len as usize];
         file.seek(SeekFrom::Start(footer.meta_offset))?;
@@ -72,7 +72,6 @@ impl Archive {
         let (chunk_block, chunk_offset) = index_chunks(&meta, archive_bytes)?;
         Ok(Archive {
             path: path.to_path_buf(),
-            file,
             header,
             cfg,
             meta,
@@ -452,6 +451,7 @@ impl<'a> BlockSource<'a> {
             .map_err(|_| Error::Corrupt("block is implausibly large"))?;
         let raw_len = usize::try_from(rec.raw_len)
             .map_err(|_| Error::Corrupt("block is implausibly large"))?;
+        quantum_check_len(len, raw_len)?;
         let mut data = vec![0u8; len];
         self.file.seek(SeekFrom::Start(rec.offset))?;
         self.file.read_exact(&mut data)?;

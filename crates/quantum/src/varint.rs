@@ -35,6 +35,7 @@ impl<'a> Reader<'a> {
         Reader { data, pos: 0 }
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.pos >= self.data.len()
     }

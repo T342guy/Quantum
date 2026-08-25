@@ -9,7 +9,7 @@
 ///
 /// Input is clamped to `-2047..=2047`, output is a 12-bit probability in
 /// `1..=4095`.
-pub fn squash(d: i32) -> i32 {
+pub const fn squash(d: i32) -> i32 {
     /// 33 samples of `4096 / (1 + e^(-x/256))`, one every 128 stretch units,
     /// clamped away from 0 and 4096 so no probability is ever certain.
     /// `logistic_table_matches_the_formula` re-derives these.
@@ -17,39 +17,48 @@ pub fn squash(d: i32) -> i32 {
         1, 2, 4, 6, 10, 17, 27, 45, 74, 120, 194, 311, 488, 747, 1102, 1546, 2048, 2550, 2994,
         3349, 3608, 3785, 3902, 3976, 4022, 4051, 4069, 4079, 4086, 4090, 4092, 4094, 4095,
     ];
-    let d = d.clamp(-2047, 2047);
+    let d = if d < -2047 {
+        -2047
+    } else if d > 2047 {
+        2047
+    } else {
+        d
+    };
     let w = d & 127;
     let idx = ((d >> 7) + 16) as usize;
     (T[idx] * (128 - w) + T[idx + 1] * w + 64) >> 7
 }
 
-/// Lookup table for [`stretch`], built once by inverting [`squash`].
-struct StretchTable([i16; 4096]);
-
-impl StretchTable {
-    const fn zeroed() -> Self {
-        StretchTable([0; 4096])
-    }
-
-    fn build() -> Self {
-        let mut t = StretchTable::zeroed();
-        let mut pi = 0usize;
-        for x in -2047..=2047i32 {
-            let v = squash(x) as usize;
-            // Every 12-bit probability in `pi..=v` stretches back to `x`.
-            for p in pi..=v {
-                t.0[p] = x as i16;
-            }
-            pi = v + 1;
+/// Lookup table for [`stretch`], built by inverting [`squash`].
+///
+/// Evaluated at compile time. It is read roughly a dozen times per coded bit,
+/// so a lazily initialised table would put an atomic load in the hottest loop
+/// in the program.
+const fn build_stretch() -> [i16; 4096] {
+    let mut t = [0i16; 4096];
+    let mut x = -2047i32;
+    let mut next = 0usize;
+    while x <= 2047 {
+        let v = squash(x) as usize;
+        // Every 12-bit probability up to `v` stretches back to `x`.
+        let mut p = next;
+        while p <= v {
+            t[p] = x as i16;
+            p += 1;
         }
-        for p in pi..4096 {
-            t.0[p] = 2047;
+        if v + 1 > next {
+            next = v + 1;
         }
-        t
+        x += 1;
     }
+    while next < 4096 {
+        t[next] = 2047;
+        next += 1;
+    }
+    t
 }
 
-static STRETCH: std::sync::LazyLock<StretchTable> = std::sync::LazyLock::new(StretchTable::build);
+static STRETCH: [i16; 4096] = build_stretch();
 
 /// `stretch(p) = ln(p / (1 - p))` scaled so the result lands in `-2047..=2047`.
 ///
@@ -57,12 +66,9 @@ static STRETCH: std::sync::LazyLock<StretchTable> = std::sync::LazyLock::new(Str
 #[inline(always)]
 pub fn stretch(p: i32) -> i32 {
     debug_assert!((0..4096).contains(&p));
-    STRETCH.0[p as usize] as i32
-}
-
-/// Force the stretch table to be materialised (useful before timing loops).
-pub fn warm_up() {
-    let _ = stretch(2048);
+    // The caller always derives `p` from a 12-bit quantity, and the mask makes
+    // that guarantee visible to the compiler so the bounds check disappears.
+    STRETCH[(p & 4095) as usize] as i32
 }
 
 #[cfg(test)]
