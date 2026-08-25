@@ -15,7 +15,8 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
-# Fast-to-build profile for tests and benchmarking iterations.
+# Fast to build, still optimised: used for tests and for profiling
+# iterations, where full LTO would dominate the edit-run cycle.
 [profile.quick]
 inherits = "release"
 lto = false

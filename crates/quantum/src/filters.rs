@@ -52,18 +52,28 @@ impl Filter {
     }
 
     pub fn apply(self, buf: &mut [u8]) {
-        match self {
-            Filter::None => {}
-            Filter::X86 => x86(buf, true),
-            Filter::Delta(s) => delta_forward(buf, s as usize),
-        }
+        self.apply_at(buf, 0);
     }
 
     pub fn unapply(self, buf: &mut [u8]) {
         match self {
             Filter::None => {}
-            Filter::X86 => x86(buf, false),
+            Filter::X86 => x86(buf, false, 0),
             Filter::Delta(s) => delta_inverse(buf, s as usize),
+        }
+    }
+
+    /// Apply to a slice that starts at `base` within some larger buffer.
+    ///
+    /// Only the probe uses a non-zero base, and it needs one: the x86
+    /// transform maps a displacement to an absolute address using the byte's
+    /// position, so a sample taken out of context would not reproduce the
+    /// address agreement that makes the transform worth applying.
+    pub fn apply_at(self, buf: &mut [u8], base: u32) {
+        match self {
+            Filter::None => {}
+            Filter::X86 => x86(buf, true, base),
+            Filter::Delta(s) => delta_forward(buf, s as usize),
         }
     }
 }
@@ -75,7 +85,7 @@ impl Filter {
 /// the four bytes that are modified are skipped by both sides, so encoder and
 /// decoder always agree on where the instructions are -- even when a rewritten
 /// displacement happens to contain `E8`.
-fn x86(buf: &mut [u8], encode: bool) {
+fn x86(buf: &mut [u8], encode: bool, base: u32) {
     if buf.len() < 5 {
         return;
     }
@@ -84,7 +94,7 @@ fn x86(buf: &mut [u8], encode: bool) {
     while i + 4 < n {
         if buf[i] == 0xE8 || buf[i] == 0xE9 {
             let d = u32::from_le_bytes([buf[i + 1], buf[i + 2], buf[i + 3], buf[i + 4]]);
-            let next = (i as u32).wrapping_add(5);
+            let next = base.wrapping_add(i as u32).wrapping_add(5);
             let v = if encode { d.wrapping_add(next) } else { d.wrapping_sub(next) };
             buf[i + 1..i + 5].copy_from_slice(&v.to_le_bytes());
             i += 5;
@@ -113,49 +123,77 @@ fn delta_inverse(buf: &mut [u8], stride: usize) {
     }
 }
 
-/// Bytes of a block fed to each probe.
-const PROBE_LEN: usize = 96 * 1024;
+/// The probe reads this many slices, spread evenly across the block...
+const PROBE_SLICES: usize = 8;
+/// ...each this long. One contiguous window is not enough: a solid block is
+/// heterogeneous by construction, and a single sample from the middle of a
+/// 40 MB block of executables can easily land in a data table and recommend a
+/// transform that wrecks the other 39 MB.
+const PROBE_SLICE_LEN: usize = 24 * 1024;
 /// Blocks smaller than this are not worth probing.
 const MIN_PROBE_INPUT: usize = 8 * 1024;
+/// A transform has to beat leaving the data alone by this much before it is
+/// worth the risk, since the probe only ever sees a sample.
+const PROBE_MARGIN_PERCENT: usize = 2;
 
-/// Pick the filter that compresses this block best.
+/// Gather a representative sample: several slices from across the block,
+/// each paired with the offset it came from.
+fn probe_slices(block: &[u8]) -> Vec<(usize, &[u8])> {
+    let slice_len = PROBE_SLICE_LEN.min(block.len());
+    let slices = PROBE_SLICES.min(block.len() / slice_len.max(1)).max(1);
+    let stride = block.len() / slices;
+    (0..slices)
+        .map(|i| {
+            let start = (i * stride).min(block.len() - slice_len);
+            (start, &block[start..start + slice_len])
+        })
+        .collect()
+}
+
+/// Pick the preprocessing filter for this block.
+///
+/// The two filters need different decision procedures, because their payoffs
+/// have different shapes:
+///
+/// * **x86** pays off over long distances -- it makes every call to a given
+///   function look identical, which only shows up once the model has seen the
+///   same target many times. A sample small enough to probe cheaply cannot
+///   observe that, and measurably under-rates the filter. Detection is used
+///   instead, and it is safe to be eager: on data that is not machine code
+///   the transform barely fires, so a false positive costs nothing while a
+///   false negative costs several percent.
+/// * **delta** pays off immediately and locally, so a sample measures it
+///   faithfully and it is decided by probing -- which matters, because delta
+///   applied to the wrong data is destructive.
 pub fn choose(block: &[u8]) -> Filter {
     if block.len() < MIN_PROBE_INPUT {
         return Filter::None;
     }
-    // Probe from the middle: the head of a solid block is often a run of
-    // small files that says nothing about the bulk.
-    let start = (block.len() / 2).saturating_sub(PROBE_LEN / 2);
-    let sample = &block[start..(start + PROBE_LEN).min(block.len())];
+    let slices = probe_slices(block);
+    let sample: Vec<u8> = slices.iter().flat_map(|(_, s)| s.iter().copied()).collect();
 
-    let mut candidates = vec![Filter::None];
-    if looks_like_code(sample) {
-        candidates.push(Filter::X86);
+    if looks_like_code(&sample) {
+        return Filter::X86;
     }
-    if let Some(stride) = likely_stride(sample) {
-        candidates.push(Filter::Delta(stride));
-    }
-    if candidates.len() == 1 {
+    let Some(stride) = likely_stride(&sample) else {
         return Filter::None;
-    }
+    };
 
     // A cheap level is enough to rank the candidates; the ordering barely
     // moves with level and probing at level 9 would cost real time.
     let probe_cfg = Config::new(1);
-    let mut best = Filter::None;
-    let mut best_size = usize::MAX;
-    let mut scratch = Vec::with_capacity(sample.len());
-    for &f in &candidates {
-        scratch.clear();
-        scratch.extend_from_slice(sample);
-        f.apply(&mut scratch);
-        let size = compress_block(&scratch, &probe_cfg).len();
-        if size < best_size {
-            best_size = size;
-            best = f;
-        }
+    let baseline = compress_block(&sample, &probe_cfg).len();
+    let mut transformed = sample.clone();
+    Filter::Delta(stride).apply(&mut transformed);
+    let with_delta = compress_block(&transformed, &probe_cfg).len();
+
+    // Only switch if the win clears the margin, since the probe is an
+    // estimate taken from a fraction of the block.
+    if with_delta + baseline * PROBE_MARGIN_PERCENT / 100 < baseline {
+        Filter::Delta(stride)
+    } else {
+        Filter::None
     }
-    best
 }
 
 /// Is there enough branch-shaped data here for the x86 filter to be worth a
@@ -284,6 +322,36 @@ mod tests {
         let mut buf = ramp.clone();
         Filter::Delta(1).apply(&mut buf);
         assert!(buf[1..].iter().all(|&b| b == 3));
+    }
+
+    #[test]
+    fn code_detection_is_specific() {
+        let mut rng = Rng(4242);
+        // Random bytes hit E8/E9 followed by 00/FF about once every 16 KB,
+        // far below the threshold.
+        let noise: Vec<u8> = (0..200_000).map(|_| rng.byte()).collect();
+        assert!(!looks_like_code(&noise), "random data must not look like code");
+
+        let text = b"the quick brown fox jumps over the lazy dog. ".repeat(5000);
+        assert!(!looks_like_code(&text), "text must not look like code");
+
+        // Something with a realistic density of near calls.
+        let mut code: Vec<u8> = (0..200_000).map(|_| rng.byte()).collect();
+        for i in (0..code.len() - 8).step_by(40) {
+            code[i] = 0xE8;
+            code[i + 4] = 0x00;
+        }
+        assert!(looks_like_code(&code), "dense near-calls must be detected");
+    }
+
+    #[test]
+    fn choose_leaves_ordinary_data_alone() {
+        let text = b"quantum picks filters by measuring, not guessing. ".repeat(4000);
+        assert_eq!(choose(&text), Filter::None);
+        let mut rng = Rng(1);
+        let noise: Vec<u8> = (0..300_000).map(|_| rng.byte()).collect();
+        assert_eq!(choose(&noise), Filter::None);
+        assert_eq!(choose(b"short"), Filter::None);
     }
 
     #[test]

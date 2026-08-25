@@ -2,6 +2,7 @@
 
 mod args;
 mod bench;
+mod limits;
 mod report;
 
 use std::io::{Read, Write};
@@ -122,15 +123,26 @@ fn create(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let opts = build_options(args)?;
+    let mut opts = build_options(args)?;
+    let plan = limits::plan(&Config::new(opts.level), opts.block_size, opts.threads);
+    opts.threads = plan.threads;
     if !args.quiet {
+        if let Some(wanted) = plan.reduced_from {
+            eprintln!(
+                "note: using {} thread(s) instead of {wanted}; level {} needs about {} each",
+                plan.threads,
+                opts.level,
+                format_bytes(plan.per_thread_bytes)
+            );
+        }
         eprintln!(
-            "creating {} at level {} ({} threads, {} blocks{})",
+            "creating {} at level {} ({} thread(s), {} blocks{}, ~{} memory)",
             dest.display(),
             opts.level,
             opts.threads,
             format_bytes(opts.block_size as u64),
-            if opts.dedup { ", deduplicated" } else { "" }
+            if opts.dedup { ", deduplicated" } else { "" },
+            format_bytes(plan.per_thread_bytes * opts.threads as u64)
         );
     }
 
@@ -159,7 +171,12 @@ fn extract(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         overwrite: args.force,
         ..Default::default()
     };
-    let threads = args.threads.unwrap_or_else(default_threads);
+    let threads = limits::plan(
+        &Config::new(archive.level()),
+        archive.block_size() as usize,
+        args.threads.unwrap_or_else(default_threads),
+    )
+    .threads;
 
     let started = std::time::Instant::now();
     let verbose = args.verbose && !args.quiet;
@@ -201,7 +218,12 @@ fn info(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 fn test(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let (path, _) = archive_and_inputs(args)?;
     let mut archive = archive::open(&path)?;
-    let threads = args.threads.unwrap_or_else(default_threads);
+    let threads = limits::plan(
+        &Config::new(archive.level()),
+        archive.block_size() as usize,
+        args.threads.unwrap_or_else(default_threads),
+    )
+    .threads;
     let started = std::time::Instant::now();
     let verbose = args.verbose && !args.quiet;
     let stats = archive.verify(threads, &mut |ev| {

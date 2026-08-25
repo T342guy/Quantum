@@ -107,9 +107,16 @@ impl Config {
     }
 
     /// Log2 of the match model's index size for a block of `block_len` bytes.
+    ///
+    /// This wants to be generous. The index holds one position per hashed
+    /// context, so if it is much smaller than the block, entries are
+    /// overwritten before they can be used and long repeats are simply
+    /// missed -- which is precisely the redundancy a dictionary compressor
+    /// with a large window would find. Sizing it to the block instead of to a
+    /// fixed budget is worth several percent on large inputs.
     fn match_bits(&self, block_len: usize) -> u32 {
         let want = block_len.max(4096).next_power_of_two().trailing_zeros();
-        want.clamp(12, 14 + self.level as u32)
+        want.clamp(12, 17 + self.level as u32)
     }
 
     /// Working-set size of one codec instance for a block of this size.

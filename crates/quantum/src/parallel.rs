@@ -176,6 +176,50 @@ mod tests {
     }
 
     #[test]
+    fn jobs_really_do_run_concurrently() {
+        // Asserting a wall-clock speedup would be flaky wherever CPU is
+        // scarce. Instead, each job announces itself and then waits for all
+        // the others: that can only complete if the pool genuinely runs
+        // `threads` jobs at the same time, however few cores there are.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Condvar, Mutex as StdMutex};
+
+        const THREADS: usize = 4;
+        let arrived = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new((StdMutex::new(false), Condvar::new()));
+        let (a, g) = (Arc::clone(&arrived), Arc::clone(&gate));
+
+        let mut pipe = Pipeline::new(THREADS, move |x: usize| {
+            if a.fetch_add(1, Ordering::SeqCst) + 1 == THREADS {
+                let (lock, cv) = &*g;
+                *lock.lock().unwrap() = true;
+                cv.notify_all();
+            }
+            let (lock, cv) = &*g;
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                let (guard, timeout) =
+                    cv.wait_timeout(open, std::time::Duration::from_secs(20)).unwrap();
+                open = guard;
+                if timeout.timed_out() {
+                    break;
+                }
+            }
+            (x, *open)
+        });
+
+        for i in 0..THREADS {
+            pipe.submit(i).unwrap();
+        }
+        let results = pipe.finish().unwrap();
+        assert_eq!(results.len(), THREADS);
+        for (i, (x, all_arrived)) in results.iter().enumerate() {
+            assert_eq!(*x, i);
+            assert!(all_arrived, "job {i} gave up waiting: the pool runs jobs one at a time");
+        }
+    }
+
+    #[test]
     fn empty_pipeline_finishes() {
         let pipe: Pipeline<u32, u32> = Pipeline::new(4, |x| x);
         assert!(pipe.finish().unwrap().is_empty());
