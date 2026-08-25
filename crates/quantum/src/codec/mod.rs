@@ -14,6 +14,31 @@
 //! the bits it has already decoded, so no model parameters are ever stored.
 //! That is where the compression comes from: the "dictionary" is rebuilt on
 //! the fly on both sides instead of being transmitted.
+//!
+//! # On making this faster
+//!
+//! This loop costs roughly 1,200 instructions per coded bit, spread thinly
+//! across a dozen small adaptive updates rather than concentrated anywhere.
+//! That shape defeats the usual remedies, all of which were tried and
+//! measured on a 700 KB sample and then reverted:
+//!
+//! * **Flattening every model's table and state map into two arenas**, to
+//!   replace three pointer hops per model per bit with arithmetic, plus
+//!   software prefetch at the nibble boundaries where all the models miss
+//!   cache at once. 0.5% fewer instructions, no measurable wall-clock change:
+//!   cache misses are under 2% of the time here, so there was nothing to win.
+//! * **A hand-written AVX2 mixer.** Slower at the default level -- ten inputs
+//!   padded to eight-wide lanes wastes more than the vectors gain, and LLVM
+//!   already vectorises the scalar loop.
+//! * **`-C target-cpu=native`.** 6% slower on the test machine, from AVX-512
+//!   downclocking.
+//! * **Profile-guided optimisation.** Byte-identical codegen. The hot loop is
+//!   already fully inlined and its branches are data-dependent, so there is
+//!   no layout for a profile to improve.
+//!
+//! What does move the needle is the level (see [`Config`]), which trades a
+//! few percent of ratio for up to 2x the speed, and block-level parallelism,
+//! which the archive layer provides.
 
 mod adapt;
 mod match_model;

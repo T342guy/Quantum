@@ -118,6 +118,27 @@ not: archives written once and stored for years, artifacts shipped over
 metered links, backups of text-shaped data. `quantum info -v` will tell you
 which case you are in for your own data before you commit to it.
 
+### Choosing a level
+
+The level is the real speed control -- it is worth up to 2x, for a few
+percent of size. Measured single-core on three kinds of data, as size
+relative to level 9 and time relative to level 9:
+
+| Level | G-code | Text | Executables | Time |
+|---|---:|---:|---:|---:|
+| 1 | +21.9% | +17.0% | +10.2% | 0.48x |
+| 2 | +9.2% | +8.9% | +7.5% | 0.46x |
+| 3 | +7.8% | +5.6% | +6.7% | 0.56x |
+| 5 | +3.0% | +2.6% | +5.2% | 0.62x |
+| 7 | +0.4% | +2.3% | +1.8% | 0.82x |
+| 9 | — | — | — | 1.00x |
+
+Level 5 is the default because it gives up 3-5% for a third of the time.
+Level 7 is close to free on data with long-range structure. Level 1 is worth
+less than it looks: the per-bit cost that does not depend on the model count
+dominates at the bottom of the ladder, so it is barely faster than level 2
+and sometimes slower, while being much worse. Start at 2 if you want speed.
+
 ### The honest part
 
 Quantum is **slow**: about 1 MB/s per core at level 5, against 2 MB/s for
