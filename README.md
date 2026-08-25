@@ -36,13 +36,13 @@ reference compressor. Lower is better.
 
 | Data | `gzip -9` | `bzip2 -9` | `xz -9e` | **`quantum -5`** | **`quantum -9`** |
 |---|---:|---:|---:|---:|---:|
-| Man pages, 2.9 MiB | 690 KiB | 509 KiB | 483 KiB | **377 KiB** | **367 KiB** |
-| Python source, 2.9 MiB | 628 KiB | 506 KiB | 478 KiB | **383 KiB** | **375 KiB** |
-| JSON/XML/config, 1.4 MiB | 188 KiB | 155 KiB | 136 KiB | **97.1 KiB** | **92.9 KiB** |
-| ELF executables, 2.9 MiB | 1.5 MiB | 1.4 MiB | 1.2 MiB | **1.0 MiB** | **1011 KiB** |
+| Man pages, 2.9 MiB | 690 KiB | 509 KiB | 483 KiB | **377 KiB** | **368 KiB** |
+| Python source, 2.9 MiB | 628 KiB | 506 KiB | 478 KiB | **383 KiB** | **376 KiB** |
+| JSON/XML/config, 1.4 MiB | 188 KiB | 155 KiB | 136 KiB | **97.2 KiB** | **92.9 KiB** |
+| ELF executables, 2.9 MiB | 1522 KiB | 1411 KiB | 1238 KiB | **1068 KiB** | **1015 KiB** |
 | Random bytes, 1.9 MiB | +339 B | +8.8 KiB | +160 B | **+21 B** | **+21 B** |
 
-Against `xz -9e`, level 9 is 24% smaller on text, 22% on source, 32% on
+Against `xz -9e`, level 9 is 24% smaller on text, 21% on source, 32% on
 structured data and 18% on executables. On incompressible input Quantum stores
 the block verbatim, so the only cost is a 21-byte stream header — and inside
 an archive, nothing at all.
@@ -58,10 +58,14 @@ cross-file redundancy to find).
 | `tar` (no compression) | 57,692,160 | | |
 | `tar.gz` (`gzip -9`) | 21,651,878 | +60% | 7 s |
 | `tar.bz2` (`bzip2 -9`) | 20,226,398 | +49% | 5 s |
-| `tar.xz` (`xz -9e`) | 13,563,608 | — | 34 s |
-| **`quantum -1`** | 14,879,504 | +10% | 38 s |
-| **`quantum -5`** | 13,641,088 | +0.6% | 64 s |
-| **`quantum -9`** | **12,861,262** | **−5.2%** | 132 s |
+| `tar.xz` (`xz -9e`) | 13,563,608 | — | 30 s |
+| **`quantum -1`** | 15,117,151 | +11% | 12 s |
+| **`quantum -5`** | 13,733,558 | +1.3% | 20 s |
+| **`quantum -9`** | **12,880,652** | **−5.0%** | 43 s |
+
+All six timed back to back on four cores. Quantum parallelises and the others
+do not, which is why level 5 lands within 1.3% of `tar.xz` in two thirds of
+the time.
 
 Deduplication alone removed 50% of `/usr/share/doc` before the compressor ran.
 
@@ -94,9 +98,9 @@ databases, documents, mail, VM images, firmware — not at your media library.
 Quantum is **slow**: about 1 MB/s per core at level 5, against 2 MB/s for
 `xz -9e` and 20 MB/s for `gzip`. Decompression costs the same as compression —
 context mixing runs the identical model on both sides, so there is no fast
-path back. It is also **memory hungry**: level 5 wants ~120 MB per worker
-thread and level 9 wants ~700 MB (the CLI reduces the thread count on its own
-rather than let that turn into an OOM).
+path back. It also wants **real memory**: roughly 100 MB per worker thread at
+level 5 and 350 MB at level 9, for the default block size. See
+[Memory](#memory) for why, and for the knobs.
 
 That trade is the whole point. Use Quantum where the data is written once and
 read rarely and the size is what costs you: backups, archival, artifacts,
@@ -225,6 +229,45 @@ long-range and a sample too small to probe cheaply cannot see it.
 
 If a block still comes out no smaller, it is stored verbatim. That is why
 random data costs exactly zero extra bytes.
+
+### Memory
+
+The memory *is* the dictionary. An LZ77 compressor remembers the data it has
+seen — a window, bounded by the data. A context-mixing model instead
+remembers *statistics about every context it has seen*: for each of ten
+models, for every distinct preceding-byte pattern, a bit history it can look
+up again later. There is no window to bound that, only a hash table, and when
+the table is too small for the block, statistics get evicted before they can
+be used.
+
+Per worker thread, at the default 16 MiB block:
+
+| Level | Memory | What it holds |
+|---|---:|---|
+| 1 | 24 MiB | 2 context models |
+| 3 | 37 MiB | 4 |
+| 5 | 104 MiB | 5 + a word model |
+| 7 | 260 MiB | 7 |
+| 9 | 356 MiB | 10 + sparse models |
+
+Two table bytes per input byte is where the curve flattens. Measured at level
+9 over the 56 MB tree above, varying only that:
+
+| Table bytes per input byte | Memory/thread | Archive | Time |
+|---|---:|---:|---:|
+| 1x | 196 MiB | +0.34% | 39 s |
+| 2x | 356 MiB | +0.15% | 43 s |
+| 4x | 676 MiB | baseline | 54 s |
+
+Doubling past 2x recovers a fiftieth of a percent and gets *slower*, because
+the tables stop fitting in cache. So 2x is what it uses.
+
+Three knobs move the total, in order of effect: **`-b/--block-size`** (tables
+are sized to the block, so `-b 4M` cuts memory roughly fourfold),
+**`-l/--level`** (see the table), and **`-T/--threads`** (memory is per
+thread). The CLI already trims the thread count to what fits in available
+memory, and to the number of blocks the input actually produces, so a 40 MB
+file never spins up thirty workers.
 
 ### The container
 

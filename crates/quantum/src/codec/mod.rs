@@ -98,25 +98,44 @@ impl Config {
 
     /// Bytes of hash table given to each context model for a block of
     /// `block_len` bytes.
+    ///
+    /// Two table bytes per input byte is where the curve flattens. Measured
+    /// at level 9 over a 56 MB mixed tree, varying only this:
+    ///
+    /// | table bytes per input byte | memory per thread | archive | time |
+    /// |---|---|---|---|
+    /// | 1x | 196 MiB | +0.34% | 39 s |
+    /// | 2x | 356 MiB | +0.15% | 43 s |
+    /// | 4x | 676 MiB |  0.00% | 54 s |
+    ///
+    /// Above 2x, memory nearly doubles to recover a fiftieth of a percent --
+    /// and gets *slower*, because the tables stop fitting in cache. Below it,
+    /// the loss becomes real: a context model needs roughly two bucket
+    /// lookups per input byte, so a table much smaller than the block starts
+    /// evicting statistics before they can be used.
+    ///
+    /// The level still raises the ceiling through `budget`, which is what
+    /// binds on blocks much larger than this.
     fn table_bytes(&self, block_len: usize) -> usize {
         let share = (self.budget / self.models.len()).next_power_of_two() >> 1;
-        // Roughly four table bytes per input byte is the point past which
-        // more memory stops paying for itself.
-        let want = block_len.saturating_mul(4).max(MIN_TABLE).next_power_of_two();
+        let want = block_len.saturating_mul(2).max(MIN_TABLE).next_power_of_two();
         want.min(share).max(MIN_TABLE)
     }
 
     /// Log2 of the match model's index size for a block of `block_len` bytes.
     ///
-    /// This wants to be generous. The index holds one position per hashed
-    /// context, so if it is much smaller than the block, entries are
-    /// overwritten before they can be used and long repeats are simply
-    /// missed -- which is precisely the redundancy a dictionary compressor
-    /// with a large window would find. Sizing it to the block instead of to a
-    /// fixed budget is worth several percent on large inputs.
+    /// The index holds one position per hashed context, so if it is much
+    /// smaller than the block, entries are overwritten before they can be
+    /// used and long repeats are simply missed -- which is precisely the
+    /// redundancy a dictionary compressor with a large window would find.
+    /// Undersizing this cost 7% on large binaries.
+    ///
+    /// One slot per four input bytes is where that stops mattering: measured
+    /// at level 9, four times as many slots changed the output by 0.001% on
+    /// text and 0.008% on binaries, for 48 MB more memory.
     fn match_bits(&self, block_len: usize) -> u32 {
         let want = block_len.max(4096).next_power_of_two().trailing_zeros();
-        want.clamp(12, 17 + self.level as u32)
+        want.saturating_sub(2).clamp(12, 15 + self.level as u32)
     }
 
     /// Working-set size of one codec instance for a block of this size.
